@@ -362,7 +362,17 @@ export default {
 
     try {
       if (partes[0] === 'health') {
-        return jsonResponse({ ok: true, ts: new Date().toISOString() });
+        return jsonResponse({
+          ok: true,
+          ts: new Date().toISOString(),
+          config: {
+            supabase_url: !!env.SUPABASE_URL,
+            supabase_key: !!env.SUPABASE_SERVICE_KEY,
+            webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
+            debug_token: !!env.DEBUG_TOKEN,
+            lancamento_padrao: env.LANCAMENTO_PADRAO || false,
+          },
+        });
       }
 
       // WEBHOOK
