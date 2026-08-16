@@ -2,7 +2,7 @@
  * DASH DE LANÇAMENTO — WORKER DE INGESTÃO (arquivo único)
  *
  * Vai na RAIZ do repositório, ao lado do wrangler.jsonc. Sem pastas.
- *
+ * 
  * Rotas:
  *   POST /w/:fonte/:secret   webhook (sellflux, quiz, sendflow, manychat, hotmart, teste)
  *   GET  /r/grupo/:secret    redirect rastreado para o grupo de WhatsApp
