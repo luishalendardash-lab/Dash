@@ -1,7 +1,6 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "dash-ingest",
-  "main": "src/index.ts",
+  "main": "index.ts",
   "compatibility_date": "2026-06-01",
   "observability": {
     "enabled": true
@@ -9,10 +8,10 @@
   "vars": {
     "LANCAMENTO_PADRAO": "lanc-2026-09"
   }
-  // SECRETS — nunca aqui dentro. Cadastre no painel:
+  // SECRETS — nunca aqui. Cadastre no painel do Cloudflare:
   // Workers & Pages > dash-ingest > Settings > Variables and Secrets
   //   SUPABASE_URL          https://xxxx.supabase.co
   //   SUPABASE_SERVICE_KEY  service_role key (Supabase > Settings > API)
-  //   WEBHOOK_SECRET        string aleatória longa — vai na URL do webhook
-  //   DEBUG_TOKEN           outra string aleatória, só pra você
+  //   WEBHOOK_SECRET        string aleatoria longa - vai na URL do webhook
+  //   DEBUG_TOKEN           outra string aleatoria, so sua
 }
