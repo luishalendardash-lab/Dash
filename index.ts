@@ -474,6 +474,8 @@ export default {
           config: {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
+            anon_key: !!env.SUPABASE_ANON_KEY,
+            versao: 'unificada-v2',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -541,8 +543,8 @@ export default {
       if (partes[0] === 'w' && req.method === 'POST') {
         const fonte = (partes[1] || '').toLowerCase();
         const secret = partes[2] || url.searchParams.get('k') || '';
-        if (secret !== env.WEBHOOK_SECRET) return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
-        if (!FONTES_VALIDAS.includes(fonte)) return jsonResponse({ ok: false, erro: 'fonte desconhecida' }, 400);
+        if (secret !== env.WEBHOOK_SECRET) return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
+        if (!FONTES_VALIDAS.includes(fonte)) return jsonResponse({ ok: false, erro: 'fonte desconhecida' }, 400, ch);
 
         const body = await safeJson(req);
         const headers: Record<string, string> = {};
@@ -552,7 +554,7 @@ export default {
         const rawId = raw?.[0]?.id ?? null;
 
         ctx.waitUntil(processar(fonte, body, rawId, db, env));
-        return jsonResponse({ ok: true, recebido: true, raw_id: rawId });
+        return jsonResponse({ ok: true, recebido: true, raw_id: rawId }, 200, ch);
       }
 
       // ---------------- REDIRECT PRO GRUPO
@@ -583,7 +585,7 @@ export default {
       // ---------------- DEBUG
       if (partes[0] === 'debug' && partes[1] === 'ultimos') {
         if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
-          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
         }
         const filtros: Record<string, string> = {
           select: 'id,fonte,recebido_em,processado,erro,body',
@@ -598,7 +600,7 @@ export default {
 
       if (partes[0] === 'debug' && partes[1] === 'reprocessar' && req.method === 'POST') {
         if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
-          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
         }
         const pendentes = await db.select('webhooks_raw',
           { select: 'id,fonte,body', processado: 'eq.false', order: 'recebido_em.asc', limit: '100' }, 'dash');
@@ -606,7 +608,7 @@ export default {
         for (const p of pendentes) {
           try { await processar(p.fonte, p.body, p.id, db, env); ok++; } catch { falhou++; }
         }
-        return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou });
+        return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou }, 200, ch);
       }
 
       // ============ API DA DASH ============
@@ -739,7 +741,7 @@ export default {
         return jsonResponse({ ok: false, erro: 'rota nao encontrada' }, 404, ch);
       }
 
-      return jsonResponse({ ok: false, erro: 'rota nao encontrada' }, 404);
+      return jsonResponse({ ok: false, erro: 'rota nao encontrada', caminho: url.pathname }, 404, ch);
     } catch (e: any) {
       return jsonResponse({ ok: false, erro: String(e?.message || e) }, 500, ch);
     }
