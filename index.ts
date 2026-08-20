@@ -30,6 +30,8 @@ interface Env {
   SELLFLUX_ENDPOINT?: string;
   SELLFLUX_TOKEN?: string;
   MANYCHAT_WEBHOOK?: string;
+  META_TOKEN?: string;           // token de usuário do sistema (Business Manager)
+  META_API_VERSAO?: string;      // ex: v25.0
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat', 'hotmart', 'teste'];
@@ -389,6 +391,176 @@ async function processar(fonte: string, body: any, rawId: number | null, db: Sup
 }
 
 // =====================================================================
+// META ADS
+// Busca campanhas/conjuntos/anúncios e as métricas diárias e grava no
+// banco. Roda por cron e também sob demanda em /sync/meta.
+// =====================================================================
+const META_VERSAO_PADRAO = 'v25.0';
+
+async function metaGet(caminho: string, params: Record<string, string>, env: Env): Promise<any> {
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const qs = new URLSearchParams({ ...params, access_token: env.META_TOKEN || '' });
+  const r = await fetch(`https://graph.facebook.com/${versao}/${caminho}?${qs}`);
+  const d: any = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) throw new Error(`meta ${caminho}: ${d?.error?.message || r.status}`);
+  return d;
+}
+
+/** Percorre a paginação do Meta até acabar (ou até o teto de páginas). */
+async function metaTudo(caminho: string, params: Record<string, string>, env: Env, teto = 12) {
+  let dados: any[] = [];
+  let d = await metaGet(caminho, { ...params, limit: '200' }, env);
+  dados = dados.concat(d.data || []);
+  let paginas = 1;
+  while (d?.paging?.next && paginas < teto) {
+    const r = await fetch(d.paging.next);
+    d = await r.json().catch(() => ({}));
+    if (d?.error) break;
+    dados = dados.concat(d.data || []);
+    paginas++;
+  }
+  return dados;
+}
+
+/** Sincroniza UMA conta de anúncios. */
+async function sincronizarConta(conta: string, slug: string, cfg: any, dias: number, db: Supabase, env: Env) {
+  const filtroIds: string[] = Array.isArray(cfg.meta_campanhas) ? cfg.meta_campanhas : [];
+  const prefixo: string = cfg.meta_prefixo || '';
+
+  // ---- campanhas
+  let campanhas = await metaTudo(`${conta}/campaigns`, { fields: 'id,name,status,objective' }, env);
+  if (filtroIds.length) campanhas = campanhas.filter((c: any) => filtroIds.includes(c.id));
+  else if (prefixo) campanhas = campanhas.filter((c: any) => (c.name || '').startsWith(prefixo));
+
+  if (!campanhas.length) {
+    return { conta, campanhas: 0, conjuntos: 0, anuncios: 0, dias_metricas: 0,
+             aviso: 'nenhuma campanha bateu com o filtro' };
+  }
+  const idsCampanha = campanhas.map((c: any) => c.id);
+
+  // ---- conjuntos e anúncios das campanhas selecionadas
+  const conjuntos = (await metaTudo(`${conta}/adsets`, { fields: 'id,name,status,campaign_id' }, env))
+    .filter((a: any) => idsCampanha.includes(a.campaign_id));
+  const idsConjunto = conjuntos.map((a: any) => a.id);
+
+  const anuncios = (await metaTudo(`${conta}/ads`,
+    { fields: 'id,name,status,adset_id,creative{id,thumbnail_url,title,body}' }, env))
+    .filter((a: any) => idsConjunto.includes(a.adset_id));
+
+  const entidades = [
+    ...campanhas.map((c: any) => ({
+      id: c.id, nivel: 'campaign', nome: c.name, parent_id: null,
+      conta_id: conta, status: c.status, objetivo: c.objective, criativo: {},
+    })),
+    ...conjuntos.map((a: any) => ({
+      id: a.id, nivel: 'adset', nome: a.name, parent_id: a.campaign_id,
+      conta_id: conta, status: a.status, criativo: {},
+    })),
+    ...anuncios.map((a: any) => ({
+      id: a.id, nivel: 'ad', nome: a.name, parent_id: a.adset_id,
+      conta_id: conta, status: a.status,
+      criativo: a.creative ? {
+        id: a.creative.id, thumb: a.creative.thumbnail_url,
+        titulo: a.creative.title, corpo: a.creative.body,
+      } : {},
+    })),
+  ];
+
+  await db.rpc('ingest_ads_entidades', { p: { lancamento: slug, entidades } });
+
+  // ---- métricas diárias por anúncio
+  const ate = new Date();
+  const de = new Date(ate.getTime() - dias * 86400000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  const bruto = await metaTudo(`${conta}/insights`, {
+    level: 'ad',
+    time_increment: '1',
+    time_range: JSON.stringify({ since: fmt(de), until: fmt(ate) }),
+    fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,spend,ctr,cpm,cpc,actions,video_play_actions',
+  }, env);
+
+  const idsAnuncio = new Set(anuncios.map((a: any) => a.id));
+  const insights = bruto
+    .filter((i: any) => idsAnuncio.has(i.ad_id))   // ignora anúncio fora do filtro do lançamento
+    .map((i: any) => {
+      // "lead" do Meta é referência; o número que vale é o do nosso banco
+      const acoes = Array.isArray(i.actions) ? i.actions : [];
+      const lead = acoes.find((a: any) => a.action_type === 'lead'
+        || a.action_type === 'offsite_conversion.fb_pixel_lead');
+      const video = Array.isArray(i.video_play_actions) ? i.video_play_actions[0] : null;
+      return {
+        data_ref: i.date_start,
+        ad_id: i.ad_id,
+        impressoes: Number(i.impressions || 0),
+        alcance: Number(i.reach || 0),
+        cliques: Number(i.clicks || 0),
+        cliques_link: Number(i.inline_link_clicks || 0),
+        gasto: Number(i.spend || 0),
+        ctr: i.ctr ? Number(i.ctr) : null,
+        cpm: i.cpm ? Number(i.cpm) : null,
+        cpc: i.cpc ? Number(i.cpc) : null,
+        leads_meta: lead ? Number(lead.value || 0) : 0,
+        video_3s: video ? Number(video.value || 0) : 0,
+        raw: {},
+      };
+    });
+
+  await db.rpc('ingest_ads_insights', { p: { lancamento: slug, insights } });
+
+  return {
+    conta,
+    campanhas: campanhas.length,
+    conjuntos: conjuntos.length,
+    anuncios: anuncios.length,
+    dias_metricas: insights.length,
+  };
+}
+
+/**
+ * Sincroniza todas as contas do lançamento.
+ * config aceita uma conta ou várias:
+ *   {"meta_account_id": "act_1"}
+ *   {"meta_contas": ["act_1", "act_2"]}
+ * Se uma conta falhar, as outras seguem — o erro dela volta na resposta.
+ */
+async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: Env): Promise<any> {
+  if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const lanc = await db.select('lancamentos', { select: 'slug,config', slug: `eq.${slug}`, limit: '1' });
+  if (!lanc[0]) return { ok: false, erro: `lancamento ${slug} nao encontrado` };
+
+  const cfg = lanc[0].config || {};
+  const contas: string[] = Array.isArray(cfg.meta_contas) && cfg.meta_contas.length
+    ? cfg.meta_contas
+    : (cfg.meta_account_id ? [cfg.meta_account_id] : []);
+
+  if (!contas.length) {
+    return { ok: false, erro: 'nenhuma conta de anuncios no config do lancamento (meta_contas ou meta_account_id)' };
+  }
+
+  const resultados: any[] = [];
+  const erros: any[] = [];
+
+  for (const conta of contas) {
+    try {
+      resultados.push(await sincronizarConta(conta, slug, cfg, dias, db, env));
+    } catch (e: any) {
+      erros.push({ conta, erro: String(e?.message || e).slice(0, 300) });
+    }
+  }
+
+  const total = await db.rpc('ingest_ads_insights', { p: { lancamento: slug, insights: [] } });
+
+  return {
+    ok: erros.length < contas.length,   // falha só se TODAS as contas falharem
+    contas: resultados,
+    erros: erros.length ? erros : undefined,
+    gasto_total: total?.gasto_total ?? 0,
+  };
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -470,7 +642,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'unificada-v4',
+            versao: 'v6-meta-multiconta',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -600,6 +772,17 @@ export default {
         return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou }, 200, ch);
       }
 
+      // ============ SINCRONIZAÇÃO MANUAL DO META ============
+      if (partes[0] === 'sync' && partes[1] === 'meta') {
+        if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
+        }
+        const slug = url.searchParams.get('lancamento') || env.LANCAMENTO_PADRAO || '';
+        const dias = Math.min(90, Number(url.searchParams.get('dias') || 30));
+        const r = await sincronizarMeta(slug, dias, db, env);
+        return jsonResponse(r, r.ok ? 200 : 400, ch);
+      }
+
       // ============ API DA DASH ============
       if (partes[0] === 'api') {
         // -------- login: o front nunca fala direto com o Supabase
@@ -677,6 +860,11 @@ export default {
         }
 
         // -------- lista de leads
+        if (partes[1] === 'anuncios') {
+          const r = await db.rpc('dash_anuncios', { p: { lancamento: slug } });
+          return jsonResponse({ ok: true, ...r }, 200, ch);
+        }
+
         if (partes[1] === 'leads') {
           const pagina = Math.max(0, Number(url.searchParams.get('pagina') || 0));
           const porPagina = Math.min(100, Number(url.searchParams.get('limite') || 50));
@@ -734,5 +922,34 @@ export default {
     } catch (e: any) {
       return jsonResponse({ ok: false, erro: String(e?.message || e) }, 500, ch);
     }
+  },
+
+  // Cron: sincroniza o Meta de hora em hora, para todo lançamento em andamento.
+  async scheduled(_evento: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const db = new Supabase(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+    ctx.waitUntil((async () => {
+      try {
+        const ativos = await db.select('lancamentos', {
+          select: 'slug',
+          status: 'in.(captacao,aquecimento,evento,carrinho)',
+        });
+        for (const l of ativos) {
+          try {
+            const r = await sincronizarMeta(l.slug, 7, db, env);
+            if (!r.ok) {
+              await db.insert('webhooks_raw', {
+                fonte: 'sync_meta_falhou', body: { lancamento: l.slug },
+                processado: false, erro: String(r.erro).slice(0, 400),
+              }).catch(() => {});
+            }
+          } catch (e: any) {
+            await db.insert('webhooks_raw', {
+              fonte: 'sync_meta_falhou', body: { lancamento: l.slug },
+              processado: false, erro: String(e?.message || e).slice(0, 400),
+            }).catch(() => {});
+          }
+        }
+      } catch {}
+    })());
   },
 };
