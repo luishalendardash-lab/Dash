@@ -32,9 +32,13 @@ interface Env {
   MANYCHAT_WEBHOOK?: string;
   META_TOKEN?: string;           // token de usuário do sistema (Business Manager)
   META_API_VERSAO?: string;      // ex: v25.0
+  HOTMART_HOTTOK?: string;       // valida que o webhook veio mesmo da Hotmart
+  TMB_TOKEN?: string;            // reserva; o normal é configurar pela tela
 }
 
-const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat', 'hotmart', 'teste'];
+const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
+                        'hotmart', 'kiwify', 'herospark', 'guru', 'tmb',
+                        'tmb-financeiro', 'teste'];
 
 // =====================================================================
 // CLIENTE SUPABASE
@@ -316,11 +320,148 @@ function parseHotmart(body: any, lp?: string, rawId?: number | null) {
   };
 }
 
+// ---------------------------------------------------------------------
+// KIWIFY — valores vêm em centavos
+// ---------------------------------------------------------------------
+const STATUS_KIWIFY: Record<string, string> = {
+  paid: 'aprovada', approved: 'aprovada',
+  waiting_payment: 'pendente', pending: 'pendente',
+  refused: 'cancelada', canceled: 'cancelada',
+  refunded: 'reembolsada', chargedback: 'chargeback', chargeback: 'chargeback',
+};
+
+function parseKiwify(body: any, lp?: string, rawId?: number | null) {
+  const bruto = (s(achar(body, ['order_status', 'status', 'webhook_event_type'])) || '').toLowerCase();
+
+  // centavos -> reais. O campo muda de nome conforme o evento.
+  const centavos = Number(
+    achar(body, ['charge_amount', 'product_base_price', 'order_amount', 'total']) ?? 0
+  ) || 0;
+  const comissao = Number(achar(body, ['my_commission', 'producer_commission']) ?? 0) || 0;
+
+  const metodoBruto = (s(achar(body, ['payment_method'])) || '').toLowerCase();
+
+  return {
+    lancamento: lp,
+    plataforma: 'kiwify',
+    transacao_id: s(achar(body, ['order_id', 'order_ref', 'id']))
+                  || (rawId ? `raw-${rawId}` : `sem-id-${Date.now()}`),
+    produto: s(achar(body, ['product_name', 'produto'])),
+    oferta: s(achar(body, ['offer_name', 'product_id'])),
+    status: STATUS_KIWIFY[bruto] || 'pendente',
+    metodo: /pix/.test(metodoBruto) ? 'pix'
+          : /boleto/.test(metodoBruto) ? 'boleto'
+          : /(credit|card)/.test(metodoBruto) ? 'cartao' : metodoBruto || undefined,
+    parcelas: s(achar(body, ['installments'])),
+    valor_bruto: centavos / 100,
+    valor_liquido: comissao / 100,
+    moeda: s(achar(body, ['currency'])) || 'BRL',
+    email: s(achar(body, ['email', 'customer_email'])),
+    telefone: s(achar(body, ['mobile', 'phone', 'customer_mobile'])),
+    src: s(achar(body, ['src', 'sck', 'utm_source'])),
+    ocorreu_em: s(achar(body, ['created_at', 'approved_date', 'updated_at'])),
+    raw: body,
+  };
+}
+
+// ---------------------------------------------------------------------
+// HERO SPARK — o corpo é montado por nós na automação, então os nomes
+// já chegam prontos. Ainda assim o parser aceita variações.
+// ---------------------------------------------------------------------
+function parseHerospark(body: any, lp?: string, rawId?: number | null) {
+  const evento = (s(achar(body, ['evento', 'event', 'status'])) || '').toLowerCase();
+  const valor = Number(
+    String(achar(body, ['valor', 'payment_total', 'total', 'amount']) ?? '0')
+      .replace(/[^0-9,.-]/g, '').replace(',', '.')
+  ) || 0;
+
+  const metodoBruto = (s(achar(body, ['metodo', 'payment_method'])) || '').toLowerCase();
+
+  return {
+    lancamento: lp,
+    plataforma: 'herospark',
+    transacao_id: s(achar(body, ['transacao', 'payment_id', 'id']))
+                  || (rawId ? `raw-${rawId}` : `sem-id-${Date.now()}`),
+    produto: s(achar(body, ['produto', 'product_name'])),
+    oferta: s(achar(body, ['produto_id', 'product_id'])),
+    status: STATUS_HOTMART[evento] || (evento.includes('approved') ? 'aprovada' : 'pendente'),
+    metodo: /pix/.test(metodoBruto) ? 'pix'
+          : /(billet|boleto)/.test(metodoBruto) ? 'boleto'
+          : /(credit|card|cartao)/.test(metodoBruto) ? 'cartao' : metodoBruto || undefined,
+    valor_bruto: valor,
+    valor_liquido: 0,
+    moeda: 'BRL',
+    email: s(achar(body, ['email', 'buyer_email'])),
+    telefone: s(achar(body, ['telefone', 'buyer_phone'])),
+    ocorreu_em: s(achar(body, ['data', 'created_at'])),
+    raw: body,
+  };
+}
+
+// ---------------------------------------------------------------------
+// TMB EDUCAÇÃO — parcelamento no boleto
+//
+// Dois valores importam e são diferentes: valor_principal é o ticket do
+// produto; valor_total é o que o aluno paga com juros do financiamento.
+// Quem fatura o produtor é o principal, então é ele que vai para a
+// receita — usar o total inflaria o faturamento em até 5x.
+//
+// A TMB também manda UTM de primeiro e último toque. Guardamos as duas.
+// ---------------------------------------------------------------------
+function parseTMB(body: any, lp?: string, rawId?: number | null) {
+  const situacao = (s(achar(body, ['status_pedido'])) || '').toLowerCase();
+
+  const status = situacao.includes('efetiv') ? 'aprovada'
+               : situacao.includes('cancel') ? 'cancelada'
+               : situacao.includes('reembols') || situacao.includes('estorn') ? 'reembolsada'
+               : 'pendente';
+
+  const principal = Number(achar(body, ['valor_principal']) ?? 0) || 0;
+  const total = Number(achar(body, ['valor_total']) ?? 0) || 0;
+  const taxa = Number(achar(body, ['taxa_administracao']) ?? 0) || 0;
+  const parcelas = Number(achar(body, ['parcelas']) ?? 0) || 0;
+
+  // Boleto parcelado: o faturamento é o valor total do contrato, e ele
+  // entra no caixa parcela a parcela. O webhook financeiro diz quanto
+  // já pingou; aqui fica o contratado.
+  const bruto = total > 0 ? total : principal;
+
+  return {
+    lancamento: lp,
+    plataforma: 'tmb',
+    transacao_id: s(achar(body, ['pedido', 'pedido_id', 'id']))
+                  || (rawId ? `raw-${rawId}` : `sem-id-${Date.now()}`),
+    produto: s(achar(body, ['lancamento_nome', 'titulo'])) || s(body?.lancamento),
+    oferta: s(achar(body, ['code', 'lancamento_id'])),
+    status,
+    metodo: 'boleto',
+    parcelas: s(achar(body, ['parcelas'])),
+    valor_bruto: bruto,
+    valor_liquido: taxa > 0 ? Number((bruto * (1 - taxa / 100)).toFixed(2)) : 0,
+    moeda: 'BRL',
+    email: s(achar(body, ['email'])),
+    telefone: s(achar(body, ['telefone_ativo', 'telefones'])),
+    src: s(achar(body, ['utm_source'])),
+    ocorreu_em: s(achar(body, ['data_efetivado', 'criado_em'])),
+    raw: {
+      ...body,
+      _ticket_produto: principal,
+      _parcelas: parcelas,
+    },
+  };
+}
+
 // =====================================================================
-// REPASSE AO SELLFLUX (server-side, depois de gravar no banco)
+// REPASSES (rodam depois de gravar; nunca seguram a resposta ao lead)
+// Os endereços configurados na tela de Integrações vencem os secrets do
+// Worker — assim o cliente muda sem precisar de deploy.
 // =====================================================================
-async function repassarSellflux(dados: any, env: Env, db: Supabase, pessoaId?: string) {
-  if (!env.SELLFLUX_ENDPOINT) return;
+async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
+  const cfgSellflux = await segredoIntegracao('sellflux', 'endpoint', db);
+  const cfgManychat = await segredoIntegracao('manychat', 'webhook', db);
+
+  const urlSellflux = (cfgSellflux?.ativa && cfgSellflux?.valor) || env.SELLFLUX_ENDPOINT;
+  const urlManychat = (cfgManychat?.ativa && cfgManychat?.valor) || env.MANYCHAT_WEBHOOK;
 
   const corpo = new URLSearchParams();
   corpo.set('name', dados.nome || '');
@@ -333,22 +474,47 @@ async function repassarSellflux(dados: any, env: Env, db: Supabase, pessoaId?: s
   if (dados.meta?.ad_id)   corpo.set('adid', dados.meta.ad_id);
   if (dados.landing_url)   corpo.set('url', dados.landing_url);
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-  };
-  if (env.SELLFLUX_TOKEN) headers['Authorization'] = `Bearer ${env.SELLFLUX_TOKEN}`;
+  // --- SellFlux (dispara a sequência de e-mail)
+  if (urlSellflux) {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (env.SELLFLUX_TOKEN) headers['Authorization'] = `Bearer ${env.SELLFLUX_TOKEN}`;
+    try {
+      const r = await fetch(urlSellflux, { method: 'POST', headers, body: corpo });
+      if (!r.ok) throw new Error(`sellflux ${r.status}`);
+    } catch (e: any) {
+      // o lead já está no banco; registra a falha para reenvio
+      await db.insert('webhooks_raw', {
+        fonte: 'saida_sellflux_falhou',
+        body: { dados, pessoa_id: pessoaId },
+        processado: false,
+        erro: String(e?.message || e).slice(0, 400),
+      }).catch(() => {});
+    }
+  }
 
-  try {
-    const r = await fetch(env.SELLFLUX_ENDPOINT, { method: 'POST', headers, body: corpo });
-    if (!r.ok) throw new Error(`sellflux ${r.status}: ${(await r.text()).slice(0, 200)}`);
-  } catch (e: any) {
-    // o lead já está no banco; registra a falha para reenvio
-    await db.insert('webhooks_raw', {
-      fonte: 'sellflux_saida_falhou',
-      body: { dados, pessoa_id: pessoaId },
-      processado: false,
-      erro: String(e?.message || e).slice(0, 500),
-    }, 'dash').catch(() => {});
+  // --- ManyChat (webhook já montado do lado do cliente)
+  if (urlManychat) {
+    try {
+      const r = await fetch(urlManychat, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nome: dados.nome, email: dados.email, telefone: dados.telefone,
+          lancamento: dados.lancamento,
+          utm_campaign: dados.utm?.campaign, adid: dados.meta?.ad_id,
+        }),
+      });
+      if (!r.ok) throw new Error(`manychat ${r.status}`);
+    } catch (e: any) {
+      await db.insert('webhooks_raw', {
+        fonte: 'saida_manychat_falhou',
+        body: { dados, pessoa_id: pessoaId },
+        processado: false,
+        erro: String(e?.message || e).slice(0, 400),
+      }).catch(() => {});
+    }
   }
 }
 
@@ -370,7 +536,20 @@ async function processar(fonte: string, body: any, rawId: number | null, db: Sup
       case 'manychat':
         resultado = await db.rpc('ingest_evento', { p: parseManychat(body, lp, rawId) }); break;
       case 'hotmart':
+      case 'guru':
         resultado = await db.rpc('ingest_venda', { p: parseHotmart(body, lp, rawId) }); break;
+      case 'kiwify':
+        resultado = await db.rpc('ingest_venda', { p: parseKiwify(body, lp, rawId) }); break;
+      case 'herospark':
+        resultado = await db.rpc('ingest_venda', { p: parseHerospark(body, lp, rawId) }); break;
+      case 'tmb':
+        resultado = await db.rpc('ingest_venda', { p: parseTMB(body, lp, rawId) }); break;
+      case 'tmb-financeiro': {
+        // avisa parcela a parcela; só somamos no total pago do pedido
+        const itens = Array.isArray(body) ? body : [body];
+        resultado = await db.rpc('ingest_pagamentos', { p: { itens } });
+        break;
+      }
       default:
         throw new Error(`sem parser para a fonte "${fonte}"`);
     }
@@ -997,6 +1176,114 @@ async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: En
 }
 
 // =====================================================================
+// SEGREDOS DAS INTEGRAÇÕES
+// Ficam no banco para o cliente configurar pela tela. O secret do Worker
+// continua valendo como reserva, caso o banco não responda.
+// =====================================================================
+const cacheSegredo = new Map<string, { ate: number; dados: any }>();
+
+async function segredoIntegracao(slug: string, chave: string, db: Supabase): Promise<any> {
+  const id = slug + ':' + chave;
+  const agora = Date.now();
+  const guardado = cacheSegredo.get(id);
+  if (guardado && guardado.ate > agora) return guardado.dados;
+
+  let dados: any = { ativa: false };
+  try {
+    dados = await db.rpc('integracao_segredo', { p: { slug, chave } });
+  } catch { /* banco fora: usa o valor do Worker */ }
+
+  cacheSegredo.set(id, { ate: agora + 60 * 1000, dados });
+  if (cacheSegredo.size > 100) cacheSegredo.clear();
+  return dados;
+}
+
+// =====================================================================
+// TMB EDUCAÇÃO
+// Não manda webhook: a dash consulta a API dela de tempos em tempos.
+// O retorno já traz UTM de primeiro e último toque, o que dá atribuição
+// mesmo para quem comprou sem passar pela nossa captação.
+// =====================================================================
+async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any> {
+  const cfg = await segredoIntegracao('tmb', 'token', db);
+  const token = (cfg?.ativa && cfg?.valor) || env.TMB_TOKEN;
+  if (!token) return { ok: false, erro: 'token da TMB nao configurado' };
+
+  const produtoId = cfg?.config?.produto_id || '';
+  const ate = new Date();
+  const de = new Date(ate.getTime() - dias * 86400000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  let pagina = 1;
+  let total = 0;
+  const pedidos: any[] = [];
+
+  // paginação: para quando a página vier menor que o tamanho pedido
+  while (pagina <= 20) {
+    const qs = new URLSearchParams({
+      pageNumber: String(pagina),
+      pageSize: '100',
+      data_inicio: fmt(de),
+      data_final: fmt(ate),
+    });
+    if (produtoId) qs.set('produto_id', String(produtoId));
+
+    const r = await fetch(`https://api.tmbeducacao.com.br/api/pedidos?${qs}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) {
+      return { ok: false, erro: `tmb ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    }
+
+    const d: any = await r.json().catch(() => null);
+    const lote: any[] = Array.isArray(d) ? d : (d?.data || d?.items || (d ? [d] : []));
+    if (!lote.length) break;
+
+    pedidos.push(...lote);
+    if (lote.length < 100) break;
+    pagina++;
+  }
+
+  for (const p of pedidos) {
+    const bruto = Number(p.valor_total || 0);
+    const taxa = Number(p.taxa_administracao || 0);
+    const situacao = String(p.status_pedido || '').toLowerCase();
+
+    const status = situacao.includes('efetiv') ? 'aprovada'
+                 : situacao.includes('cancel') ? 'cancelada'
+                 : situacao.includes('reembols') ? 'reembolsada'
+                 : 'pendente';
+
+    try {
+      await db.rpc('ingest_venda', {
+        p: {
+          lancamento: env.LANCAMENTO_PADRAO,
+          plataforma: 'tmb',
+          transacao_id: String(p.pedido_id ?? ''),
+          produto: p.lancamento || p.produto_nome || null,
+          oferta: p.produto_id ? String(p.produto_id) : null,
+          status,
+          metodo: 'financiamento',
+          parcelas: p.parcelas ?? null,
+          valor_bruto: bruto,
+          valor_liquido: taxa > 0 ? Number((bruto * (1 - taxa / 100)).toFixed(2)) : 0,
+          moeda: 'BRL',
+          email: p.email || null,
+          telefone: p.telefone || null,
+          src: p.utm_source || null,
+          ocorreu_em: p.data_efetivado || p.criado_em || null,
+          raw: p,
+        },
+      });
+      total++;
+    } catch { /* um pedido torto não derruba o lote */ }
+  }
+
+  await db.rpc('reconciliar_vendas', { p: {} }).catch(() => {});
+  return { ok: true, pedidos: pedidos.length, gravados: total };
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -1078,7 +1365,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v14-form',
+            versao: 'v21-tmb-simples',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1129,7 +1416,7 @@ export default {
         }
 
         // 2) SellFlux depois, sem segurar a resposta ao lead
-        ctx.waitUntil(repassarSellflux(dados, env, db, r?.pessoa_id));
+        ctx.waitUntil(repassar(dados, env, db, r?.pessoa_id));
 
         return jsonResponse({
           ok: true, inscricao_id: r?.inscricao_id, novo: r?.novo,
@@ -1146,6 +1433,35 @@ export default {
         const body = await safeJson(req);
         const headers: Record<string, string> = {};
         req.headers.forEach((v, k) => { headers[k] = v; });
+
+        // A Hotmart assina cada webhook com o hottok. Sem conferir, quem
+        // descobrir a URL poderia inventar vendas no seu faturamento.
+        // A TMB deixa você escolher o nome e o valor do header de
+        // autenticação. Usamos x-dash-token com o mesmo segredo da URL.
+        if (fonte === 'tmb' || fonte === 'tmb-financeiro') {
+          const guardado = await segredoIntegracao('tmb', 'header_valor', db);
+          const esperado = guardado?.valor || '';
+          if (esperado) {
+            const recebido = req.headers.get('x-dash-token') || '';
+            if (recebido !== esperado) {
+              return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
+            }
+          }
+        }
+
+        if (fonte === 'hotmart') {
+          const guardado = await segredoIntegracao('hotmart', 'hottok', db);
+          const esperado = guardado?.valor || env.HOTMART_HOTTOK || '';
+          const recebido = req.headers.get('x-hotmart-hottok')
+            || s(achar(body, ['hottok'])) || '';
+          if (esperado && recebido !== esperado) {
+            await db.insert('webhooks_raw', {
+              fonte: 'hotmart_hottok_invalido', headers, body,
+              processado: false, erro: 'hottok nao confere',
+            }).catch(() => {});
+            return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
+          }
+        }
 
         const raw = await db.insert('webhooks_raw', { fonte, headers, body, processado: false }, 'dash');
         const rawId = raw?.[0]?.id ?? null;
@@ -1271,6 +1587,16 @@ export default {
         return jsonResponse({ ...r, grupo_url: link }, 200, ch);
       }
 
+      // ============ SINCRONIZAÇÃO MANUAL DA TMB ============
+      if (partes[0] === 'sync' && partes[1] === 'tmb') {
+        if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
+        }
+        const dias = Math.min(180, Number(url.searchParams.get('dias') || 30));
+        const r = await sincronizarTMB(dias, db, env);
+        return jsonResponse(r, r.ok ? 200 : 400, ch);
+      }
+
       // ============ SINCRONIZAÇÃO MANUAL DO META ============
       if (partes[0] === 'sync' && partes[1] === 'meta') {
         if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
@@ -1389,6 +1715,42 @@ export default {
         }
 
         // -------- lista de leads
+        if (partes[1] === 'sincronizar' && partes[2]) {
+          const alvo = partes[2];
+          if (alvo === 'tmb') {
+            const r = await sincronizarTMB(30, db, env);
+            return jsonResponse(r, r.ok ? 200 : 400, ch);
+          }
+          if (alvo === 'meta') {
+            const r = await sincronizarMeta(slug || env.LANCAMENTO_PADRAO || '', 30, db, env);
+            return jsonResponse(r, r.ok ? 200 : 400, ch);
+          }
+          return jsonResponse({ ok: false, erro: 'sem sincronizacao para ' + alvo }, 400, ch);
+        }
+
+        if (partes[1] === 'integracoes' && req.method === 'GET') {
+          const r = await db.rpc('dash_integracoes', { p: {} });
+          return jsonResponse({ ...r, webhook_base: url.origin,
+                                webhook_secret: env.WEBHOOK_SECRET }, 200, ch);
+        }
+
+        if (partes[1] === 'integracoes' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_integracao', { p: corpo });
+          cacheSegredo.clear();   // muda a config, invalida o que estava guardado
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'vendas') {
+          const r = await db.rpc('dash_vendas', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'reconciliar' && req.method === 'POST') {
+          const r = await db.rpc('reconciliar_vendas', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
         if (partes[1] === 'anuncios') {
           const r = await db.rpc('dash_anuncios', { p: { lancamento: slug } });
           return jsonResponse({ ok: true, ...r }, 200, ch);
@@ -1464,6 +1826,8 @@ export default {
         });
         for (const l of ativos) {
           try {
+            // venda pode chegar antes do lead existir; isso religa as pontas
+            await db.rpc('reconciliar_vendas', { p: { lancamento: l.slug } }).catch(() => {});
             const r = await sincronizarMeta(l.slug, 7, db, env);
             if (!r.ok) {
               await db.insert('webhooks_raw', {
