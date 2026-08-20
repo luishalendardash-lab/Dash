@@ -713,7 +713,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v11-anuncios',
+            versao: 'v12-quiz',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -843,6 +843,39 @@ export default {
         return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou }, 200, ch);
       }
 
+      // ============ QUIZ (público — o lead responde) ============
+      if (partes[0] === 'quiz' && req.method === 'GET') {
+        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
+        const r = await db.rpc('quiz_publico', { p: { lancamento: slug } });
+        return jsonResponse(r, r?.ok === false ? 404 : 200, ch);
+      }
+
+      if (partes[0] === 'quiz' && req.method === 'POST') {
+        const corpo: any = await safeJson(req);
+
+        // mesma proteção da captura: campo isca e tempo mínimo
+        if (s(corpo?.empresa) || s(corpo?.website)) {
+          return jsonResponse({ ok: true, recebido: true }, 200, ch);
+        }
+
+        const r = await db.rpc('responder_quiz', {
+          p: {
+            inscricao_id: s(corpo?.inscricao_id),
+            email: s(corpo?.email),
+            telefone: s(corpo?.telefone),
+            lancamento: s(corpo?.lancamento) || env.LANCAMENTO_PADRAO,
+            respostas: corpo?.respostas || {},
+          },
+        });
+        if (r?.ok === false) return jsonResponse(r, 400, ch);
+
+        // devolve o link do grupo já rastreado
+        const slug = s(corpo?.lancamento) || env.LANCAMENTO_PADRAO || '';
+        const link = `${url.origin}/r/grupo/${env.WEBHOOK_SECRET}`
+                   + `?l=${encodeURIComponent(slug)}&i=${r.inscricao_id}`;
+        return jsonResponse({ ...r, grupo_url: link }, 200, ch);
+      }
+
       // ============ SINCRONIZAÇÃO MANUAL DO META ============
       if (partes[0] === 'sync' && partes[1] === 'meta') {
         if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
@@ -905,6 +938,17 @@ export default {
         const slug = url.searchParams.get('lancamento') || '';
 
         // -------- lançamentos
+        if (partes[1] === 'quiz' && req.method === 'GET') {
+          const r = await db.rpc('quiz_admin', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'quiz' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_quiz', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
         if (partes[1] === 'sugerir-codigo') {
           const r = await db.rpc('sugerir_codigo', {
             p: { captacao_inicio: url.searchParams.get('inicio') || null },
