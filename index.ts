@@ -1,68 +1,395 @@
 /**
- * DASH DE LANÇAMENTO — API
- * Worker separado do de ingestão. Arquivo único, na raiz do repositório.
+ * DASH DE LANÇAMENTO — WORKER ÚNICO
+ * Arquivo único na raiz do repositório. Faz a ingestão E serve a dash.
  *
- * Autenticação: o login passa por aqui. O front manda e-mail e senha, 
- * este Worker conversa com o Supabase Auth e devolve o token. Nenhuma
- * chave do Supabase existe no navegador — nem a anon.
+ * ---- ENTRADA DE DADOS ----
+ *   POST /captura              formulário próprio -> banco -> SellFlux + ManyChat
+ *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow, quiz)
+ *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp
+ *   GET  /debug/ultimos        últimos payloads crus
+ *   POST /debug/reprocessar    reprocessa o que falhou
  *
- * Rotas públicas:
- *   GET  /api/health
- *   POST /api/login     { email, senha } -> { token, refresh }
- *   POST /api/refresh   { refresh }      -> { token, refresh }
+ * ---- DASH (login por e-mail e senha) ----
+ *   POST /api/login            { email, senha } -> { token, refresh }
+ *   POST /api/refresh          { refresh }      -> { token, refresh }
+ *   GET  /api/lancamentos
+ *   GET  /api/home?lancamento=&periodo=&dias=
+ *   GET  /api/leads?lancamento=&etapa=&busca=&pagina=
+ *   GET  /api/lead/:id
  *
- * Rotas com Authorization: Bearer <token>:
- *   GET /api/lancamentos
- *   GET /api/home?lancamento=slug&periodo=mes
- *   GET /api/leads?lancamento=slug&etapa=&busca=&pagina=0
- *   GET /api/lead/:id
- *   GET /api/health          (não exige token)
+ *   GET  /health               diagnóstico
  */
 
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
-  SUPABASE_ANON_KEY: string;
-  ORIGENS_PERMITIDAS?: string;
+  SUPABASE_ANON_KEY: string;     // valida o login da dash
+  WEBHOOK_SECRET: string;
+  DEBUG_TOKEN: string;
+  LANCAMENTO_PADRAO?: string;
+  ORIGENS_PERMITIDAS?: string;   // "https://sua-dash.pages.dev,https://captura.seudominio.com"
+  SELLFLUX_ENDPOINT?: string;
+  SELLFLUX_TOKEN?: string;
+  MANYCHAT_WEBHOOK?: string;
 }
 
+const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat', 'hotmart', 'teste'];
+
 // =====================================================================
-// SUPABASE
+// CLIENTE SUPABASE
 // =====================================================================
 class Supabase {
   constructor(private url: string, private key: string) {}
 
-  private headers(schema = 'dash') {
-    return {
+  private headers(schema?: string, extra: Record<string, string> = {}) {
+    const h: Record<string, string> = {
       apikey: this.key,
       Authorization: `Bearer ${this.key}`,
       'Content-Type': 'application/json',
-      'Accept-Profile': schema,
-      'Content-Profile': schema,
+      ...extra,
     };
+    if (schema && schema !== 'public') {
+      h['Accept-Profile'] = schema;
+      h['Content-Profile'] = schema;
+    }
+    return h;
   }
 
   async rpc(fn: string, args: Record<string, any>): Promise<any> {
     const r = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
-      method: 'POST',
-      headers: {
-        apikey: this.key,
-        Authorization: `Bearer ${this.key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(args),
+      method: 'POST', headers: this.headers(), body: JSON.stringify(args),
     });
     const texto = await r.text();
     if (!r.ok) throw new Error(`rpc ${fn} ${r.status}: ${texto.slice(0, 300)}`);
     try { return JSON.parse(texto); } catch { return texto; }
   }
 
-  async select(tabela: string, filtros: Record<string, string> = {}, schema = 'dash') {
+  async insert(tabela: string, dados: any, schema = 'public'): Promise<any> {
+    const r = await fetch(`${this.url}/rest/v1/${tabela}`, {
+      method: 'POST',
+      headers: this.headers(schema, { Prefer: 'return=representation' }),
+      body: JSON.stringify(dados),
+    });
+    const texto = await r.text();
+    if (!r.ok) throw new Error(`insert ${tabela} ${r.status}: ${texto.slice(0, 300)}`);
+    try { return JSON.parse(texto); } catch { return null; }
+  }
+
+  async update(tabela: string, filtros: Record<string, string>, dados: any, schema = 'public') {
+    const qs = new URLSearchParams(filtros).toString();
+    const r = await fetch(`${this.url}/rest/v1/${tabela}?${qs}`, {
+      method: 'PATCH',
+      headers: this.headers(schema, { Prefer: 'return=minimal' }),
+      body: JSON.stringify(dados),
+    });
+    if (!r.ok) throw new Error(`update ${tabela} ${r.status}`);
+    return true;
+  }
+
+  async select(tabela: string, filtros: Record<string, string> = {}, schema = 'public'): Promise<any[]> {
     const qs = new URLSearchParams(filtros).toString();
     const r = await fetch(`${this.url}/rest/v1/${tabela}?${qs}`, { headers: this.headers(schema) });
     const texto = await r.text();
     if (!r.ok) throw new Error(`select ${tabela} ${r.status}: ${texto.slice(0, 300)}`);
     try { return JSON.parse(texto); } catch { return []; }
+  }
+}
+
+// =====================================================================
+// HELPERS
+// =====================================================================
+function jsonResponse(dados: any, status = 200, extraHeaders: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(dados, null, 2), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders },
+  });
+}
+
+function corsHeaders(origem: string | null, env: Env): Record<string, string> {
+  const lista = (env.ORIGENS_PERMITIDAS || '')
+    .split(',').map((o) => o.trim()).filter(Boolean);
+
+  const permitido = lista.length === 0 ? (origem || '*')
+                  : (origem && lista.includes(origem) ? origem : '');
+
+  if (!permitido) return {};
+  return {
+    'Access-Control-Allow-Origin': permitido,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin',
+  };
+}
+
+async function safeJson(req: Request): Promise<any> {
+  const tipo = (req.headers.get('content-type') || '').toLowerCase();
+  const texto = await req.text();
+  if (!texto) return {};
+  if (tipo.includes('form-urlencoded')) {
+    const obj: Record<string, any> = {};
+    new URLSearchParams(texto).forEach((v, k) => {
+      try { obj[k] = JSON.parse(v); } catch { obj[k] = v; }
+    });
+    return obj;
+  }
+  try { return JSON.parse(texto); } catch { return { _texto_bruto: texto }; }
+}
+
+// =====================================================================
+// PARSERS TOLERANTES
+// =====================================================================
+function achar(obj: any, nomes: string[], profundidade = 6): any {
+  if (!obj || typeof obj !== 'object' || profundidade < 0) return undefined;
+  const alvos = nomes.map((n) => n.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  for (const [k, v] of Object.entries(obj)) {
+    const chave = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (alvos.includes(chave) && v !== null && v !== '' && typeof v !== 'object') return v;
+  }
+  for (const v of Object.values(obj)) {
+    if (v && typeof v === 'object') {
+      const achado = achar(v, nomes, profundidade - 1);
+      if (achado !== undefined) return achado;
+    }
+  }
+  return undefined;
+}
+
+const s = (v: any): string | undefined => {
+  if (v === null || v === undefined) return undefined;
+  const t = String(v).trim();
+  return t === '' ? undefined : t;
+};
+
+const EMAIL_KEYS = ['email', 'e_mail', 'mail', 'lead_email', 'buyer_email', 'contact_email'];
+const FONE_KEYS = ['telefone', 'phone', 'whatsapp', 'celular', 'fone', 'phone_number',
+                   'mobile', 'lead_phone', 'buyer_phone', 'wa_id', 'numero'];
+const NOME_KEYS = ['nome', 'name', 'full_name', 'first_name', 'lead_name', 'buyer_name', 'nome_completo'];
+
+function extrairUtm(body: any) {
+  const utm: any = {
+    source: s(achar(body, ['utm_source', 'utmsource', 'source', 'origem_utm'])),
+    medium: s(achar(body, ['utm_medium', 'utmmedium', 'medium'])),
+    campaign: s(achar(body, ['utm_campaign', 'utmcampaign', 'campaign', 'campanha'])),
+    content: s(achar(body, ['utm_content', 'utmcontent', 'content', 'criativo'])),
+    term: s(achar(body, ['utm_term', 'utmterm', 'term'])),
+  };
+  const meta: any = {
+    campaign_id: s(achar(body, ['cid', 'campaign_id', 'campaignid'])),
+    adset_id: s(achar(body, ['aid', 'adset_id', 'adsetid'])),
+    ad_id: s(achar(body, ['adid', 'ad_id', 'anuncio_id'])),
+  };
+  let fbclid = s(achar(body, ['fbclid', 'fbc']));
+  const landing = s(achar(body, ['pagina_origem', 'url', 'page_url', 'landing_url', 'pagina', 'link']));
+
+  if (landing && landing.includes('?')) {
+    try {
+      const qs = new URL(landing.startsWith('http') ? landing : `https://x.com${landing}`).searchParams;
+      utm.source ||= s(qs.get('utm_source'));
+      utm.medium ||= s(qs.get('utm_medium'));
+      utm.campaign ||= s(qs.get('utm_campaign'));
+      utm.content ||= s(qs.get('utm_content'));
+      utm.term ||= s(qs.get('utm_term'));
+      meta.campaign_id ||= s(qs.get('cid')) || s(qs.get('campaign_id'));
+      meta.adset_id ||= s(qs.get('aid')) || s(qs.get('adset_id'));
+      meta.ad_id ||= s(qs.get('adid')) || s(qs.get('ad_id'));
+      fbclid ||= s(qs.get('fbclid'));
+    } catch {}
+  }
+  return { utm, meta, fbclid, landing_url: landing };
+}
+
+function parseSellflux(body: any, lp?: string, rawId?: number | null) {
+  const { utm, meta, fbclid, landing_url } = extrairUtm(body);
+  const idOrigem = s(achar(body, ['id', 'lead_id', 'leadid', 'uuid', 'contact_id']));
+  return {
+    lancamento: s(achar(body, ['lancamento', 'launch', 'lanc'])) || lp,
+    email: s(achar(body, EMAIL_KEYS)),
+    telefone: s(achar(body, FONE_KEYS)),
+    nome: s(achar(body, NOME_KEYS)),
+    origem: 'sellflux',
+    sellflux_lead_id: idOrigem,
+    capturado_em: s(achar(body, ['created_at', 'data', 'date', 'timestamp'])),
+    utm, meta, fbclid, landing_url,
+    dedupe_key: idOrigem ? `sellflux:${idOrigem}` : rawId ? `raw:${rawId}` : undefined,
+    payload: body,
+  };
+}
+
+function parseQuiz(body: any, lp?: string, rawId?: number | null) {
+  let respostas = achar(body, ['respostas', 'answers', 'resultados']);
+  if (!Array.isArray(respostas)) {
+    respostas = Array.isArray(body?.respostas) ? body.respostas
+              : Array.isArray(body?.answers) ? body.answers : [];
+  }
+  const normalizadas = (respostas as any[]).map((r: any) => ({
+    chave: s(r?.chave ?? r?.key ?? r?.question_id ?? r?.pergunta) || 'sem_chave',
+    valor: s(r?.valor ?? r?.value ?? r?.answer ?? r?.resposta),
+    label: s(r?.label ?? r?.texto ?? r?.answer_label),
+    pontos: Number(r?.pontos ?? r?.points ?? r?.score ?? 0) || 0,
+  }));
+  return {
+    lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
+    email: s(achar(body, EMAIL_KEYS)),
+    telefone: s(achar(body, FONE_KEYS)),
+    nome: s(achar(body, NOME_KEYS)),
+    fonte: 'quiz',
+    score: achar(body, ['score', 'pontuacao', 'lead_score']),
+    tier: s(achar(body, ['tier', 'classificacao', 'nivel'])),
+    respostas: normalizadas,
+    dedupe_key: rawId ? `quiz:raw:${rawId}` : undefined,
+  };
+}
+
+function parseSendflow(body: any, lp?: string, rawId?: number | null) {
+  const evento = (s(achar(body, ['event', 'evento', 'tipo', 'action', 'status'])) || '').toLowerCase();
+  let tipo = 'grupo_entrou';
+  if (/(sai|left|remov|exit|out)/.test(evento)) tipo = 'grupo_saiu';
+  return {
+    lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
+    email: s(achar(body, EMAIL_KEYS)),
+    telefone: s(achar(body, FONE_KEYS)),
+    nome: s(achar(body, NOME_KEYS)),
+    tipo, fonte: 'sendflow',
+    ocorreu_em: s(achar(body, ['created_at', 'timestamp', 'data', 'date'])),
+    payload: {
+      grupo: s(achar(body, ['grupo', 'group', 'group_name', 'nome_grupo'])),
+      evento_original: evento, raw: body,
+    },
+    dedupe_key: rawId ? `sendflow:raw:${rawId}` : undefined,
+  };
+}
+
+function parseManychat(body: any, lp?: string, rawId?: number | null) {
+  const evento = (s(achar(body, ['event', 'evento', 'type', 'tipo'])) || '').toLowerCase();
+  const tipo = /(reply|resposta|received|inbound|respondeu)/.test(evento)
+    ? 'whats_respondido' : 'whats_enviado';
+  return {
+    lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
+    email: s(achar(body, EMAIL_KEYS)),
+    telefone: s(achar(body, FONE_KEYS)),
+    nome: s(achar(body, NOME_KEYS)),
+    tipo, fonte: 'manychat',
+    ocorreu_em: s(achar(body, ['timestamp', 'created_at', 'data'])),
+    payload: {
+      manychat_id: s(achar(body, ['subscriber_id', 'contact_id', 'id'])),
+      fluxo: s(achar(body, ['flow', 'fluxo', 'campaign', 'tag'])),
+      raw: body,
+    },
+    dedupe_key: rawId ? `manychat:raw:${rawId}` : undefined,
+  };
+}
+
+const STATUS_HOTMART: Record<string, string> = {
+  approved: 'aprovada', complete: 'aprovada',
+  purchase_approved: 'aprovada', purchase_complete: 'aprovada',
+  waiting_payment: 'pendente', purchase_billet_printed: 'pendente',
+  printed_billet: 'pendente', purchase_protest: 'pendente',
+  canceled: 'cancelada', purchase_canceled: 'cancelada', expired: 'cancelada',
+  refunded: 'reembolsada', purchase_refunded: 'reembolsada',
+  chargeback: 'chargeback', purchase_chargeback: 'chargeback',
+};
+
+function parseHotmart(body: any, lp?: string, rawId?: number | null) {
+  const bruto = (s(achar(body, ['status', 'event', 'evento', 'transaction_status'])) || '').toLowerCase();
+  const valor = Number(achar(body, ['full_price', 'price', 'valor', 'total', 'amount']) ?? 0) || 0;
+  const metodoBruto = (s(achar(body, ['payment_type', 'metodo', 'payment_method'])) || '').toLowerCase();
+  const metodo = /pix/.test(metodoBruto) ? 'pix'
+               : /(billet|boleto)/.test(metodoBruto) ? 'boleto'
+               : /(credit|card|cartao)/.test(metodoBruto) ? 'cartao'
+               : metodoBruto || undefined;
+  return {
+    lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
+    plataforma: 'hotmart',
+    transacao_id: s(achar(body, ['transaction', 'transaction_id', 'transacao', 'order_id']))
+                  || (rawId ? `raw-${rawId}` : `sem-id-${Date.now()}`),
+    produto: s(achar(body, ['product_name', 'prod_name', 'produto', 'name'])),
+    oferta: s(achar(body, ['offer', 'oferta', 'off', 'offer_code'])),
+    status: STATUS_HOTMART[bruto] || 'pendente',
+    metodo,
+    parcelas: s(achar(body, ['installments_number', 'parcelas', 'installments'])),
+    valor_bruto: valor,
+    valor_liquido: Number(achar(body, ['producer_value', 'commission']) ?? 0) || 0,
+    moeda: s(achar(body, ['currency', 'currency_code', 'moeda'])) || 'BRL',
+    email: s(achar(body, EMAIL_KEYS)),
+    telefone: s(achar(body, FONE_KEYS)),
+    src: s(achar(body, ['src', 'sck', 'source'])),
+    ocorreu_em: s(achar(body, ['purchase_date', 'order_date', 'creation_date', 'timestamp'])),
+    raw: body,
+  };
+}
+
+// =====================================================================
+// REPASSE AO SELLFLUX (server-side, depois de gravar no banco)
+// =====================================================================
+async function repassarSellflux(dados: any, env: Env, db: Supabase, pessoaId?: string) {
+  if (!env.SELLFLUX_ENDPOINT) return;
+
+  const corpo = new URLSearchParams();
+  corpo.set('name', dados.nome || '');
+  corpo.set('email', dados.email || '');
+  corpo.set('phone', dados.telefone || '');
+  if (dados.utm?.source)   corpo.set('utm_source', dados.utm.source);
+  if (dados.utm?.medium)   corpo.set('utm_medium', dados.utm.medium);
+  if (dados.utm?.campaign) corpo.set('utm_campaign', dados.utm.campaign);
+  if (dados.utm?.content)  corpo.set('utm_content', dados.utm.content);
+  if (dados.meta?.ad_id)   corpo.set('adid', dados.meta.ad_id);
+  if (dados.landing_url)   corpo.set('url', dados.landing_url);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
+  if (env.SELLFLUX_TOKEN) headers['Authorization'] = `Bearer ${env.SELLFLUX_TOKEN}`;
+
+  try {
+    const r = await fetch(env.SELLFLUX_ENDPOINT, { method: 'POST', headers, body: corpo });
+    if (!r.ok) throw new Error(`sellflux ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  } catch (e: any) {
+    // o lead já está no banco; registra a falha para reenvio
+    await db.insert('webhooks_raw', {
+      fonte: 'sellflux_saida_falhou',
+      body: { dados, pessoa_id: pessoaId },
+      processado: false,
+      erro: String(e?.message || e).slice(0, 500),
+    }, 'dash').catch(() => {});
+  }
+}
+
+// =====================================================================
+// PROCESSAMENTO DE WEBHOOK DE ENTRADA
+// =====================================================================
+async function processar(fonte: string, body: any, rawId: number | null, db: Supabase, env: Env) {
+  try {
+    let resultado: any;
+    const lp = env.LANCAMENTO_PADRAO;
+    switch (fonte) {
+      case 'sellflux':
+      case 'teste':
+        resultado = await db.rpc('ingest_lead', { p: parseSellflux(body, lp, rawId) }); break;
+      case 'quiz':
+        resultado = await db.rpc('ingest_quiz', { p: parseQuiz(body, lp, rawId) }); break;
+      case 'sendflow':
+        resultado = await db.rpc('ingest_evento', { p: parseSendflow(body, lp, rawId) }); break;
+      case 'manychat':
+        resultado = await db.rpc('ingest_evento', { p: parseManychat(body, lp, rawId) }); break;
+      case 'hotmart':
+        resultado = await db.rpc('ingest_venda', { p: parseHotmart(body, lp, rawId) }); break;
+      default:
+        throw new Error(`sem parser para a fonte "${fonte}"`);
+    }
+    if (rawId) {
+      const deuCerto = resultado?.ok !== false;
+      await db.update('webhooks_raw', { id: `eq.${rawId}` }, {
+        processado: deuCerto,
+        erro: deuCerto ? null : String(resultado?.erro || 'rpc retornou ok:false'),
+      }, 'dash');
+    }
+  } catch (e: any) {
+    if (rawId) {
+      await db.update('webhooks_raw', { id: `eq.${rawId}` }, {
+        processado: false, erro: String(e?.message || e).slice(0, 500),
+      }, 'dash').catch(() => {});
+    }
   }
 }
 
@@ -90,30 +417,6 @@ async function usuarioDoToken(token: string | null, env: Env): Promise<string | 
   cacheToken.set(token, { ate: agora + 5 * 60 * 1000, email: u.email || u.id });
   if (cacheToken.size > 500) cacheToken.clear();
   return u.email || u.id;
-}
-
-// =====================================================================
-// HELPERS
-// =====================================================================
-function cors(origem: string | null, env: Env): Record<string, string> {
-  const lista = (env.ORIGENS_PERMITIDAS || '').split(',').map((o) => o.trim()).filter(Boolean);
-  const permitido = lista.length === 0 ? (origem || '*')
-                  : (origem && lista.includes(origem) ? origem : '');
-  if (!permitido) return {};
-  return {
-    'Access-Control-Allow-Origin': permitido,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-    'Vary': 'Origin',
-  };
-}
-
-function json(dados: any, status = 200, extra: Record<string, string> = {}) {
-  return new Response(JSON.stringify(dados), {
-    status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', ...extra },
-  });
 }
 
 /** Traduz o filtro da tela em um intervalo de datas. */
@@ -152,156 +455,293 @@ function intervalo(periodo: string, de?: string | null, ate?: string | null) {
 // ROTEADOR
 // =====================================================================
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const partes = url.pathname.split('/').filter(Boolean);
-    const ch = cors(req.headers.get('origin'), env);
     const db = new Supabase(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
-
-    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: ch });
-    if (partes[0] !== 'api') return json({ ok: false, erro: 'rota nao encontrada' }, 404, ch);
+    const origem = req.headers.get('origin');
+    const ch = corsHeaders(origem, env);
 
     try {
-      if (partes[1] === 'health') {
-        return json({
+      if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: ch });
+      }
+
+      if (partes[0] === 'health') {
+        return jsonResponse({
           ok: true,
           ts: new Date().toISOString(),
           config: {
             supabase_url: !!env.SUPABASE_URL,
-            service_key: !!env.SUPABASE_SERVICE_KEY,
-            anon_key: !!env.SUPABASE_ANON_KEY,
-            origens: env.ORIGENS_PERMITIDAS || 'todas',
+            supabase_key: !!env.SUPABASE_SERVICE_KEY,
+            webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
+            debug_token: !!env.DEBUG_TOKEN,
+            lancamento_padrao: env.LANCAMENTO_PADRAO || false,
+            origens_permitidas: env.ORIGENS_PERMITIDAS || 'todas (feche antes de rodar trafego)',
+            sellflux_endpoint: env.SELLFLUX_ENDPOINT ? 'configurado' : 'nao configurado',
           },
-        }, 200, ch);
+        });
       }
 
-      // -------- login: o front nunca fala direto com o Supabase
-      if (partes[1] === 'login' && req.method === 'POST') {
-        const corpo: any = await req.json().catch(() => ({}));
-        const r = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', apikey: env.SUPABASE_ANON_KEY },
-          body: JSON.stringify({ email: corpo.email || '', password: corpo.senha || '' }),
-        });
-        const d: any = await r.json().catch(() => ({}));
-
-        if (!r.ok || !d.access_token) {
-          await new Promise((res) => setTimeout(res, 500));
-          return json({ ok: false, erro: 'e-mail ou senha incorretos' }, 401, ch);
+      // ---------------- CAPTURA (formulário próprio)
+      if (partes[0] === 'captura' && req.method === 'POST') {
+        const lista = (env.ORIGENS_PERMITIDAS || '').split(',').map((o) => o.trim()).filter(Boolean);
+        if (lista.length > 0 && (!origem || !lista.includes(origem))) {
+          return jsonResponse({ ok: false, erro: 'origem nao permitida' }, 403, ch);
         }
-        return json({
-          ok: true,
-          token: d.access_token,
-          refresh: d.refresh_token,
-          expira_em: d.expires_in || 3600,
-          email: d.user?.email || corpo.email,
-        }, 200, ch);
-      }
 
-      // -------- renovação do token
-      if (partes[1] === 'refresh' && req.method === 'POST') {
-        const corpo: any = await req.json().catch(() => ({}));
-        const r = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', apikey: env.SUPABASE_ANON_KEY },
-          body: JSON.stringify({ refresh_token: corpo.refresh || '' }),
-        });
-        const d: any = await r.json().catch(() => ({}));
-        if (!r.ok || !d.access_token) {
-          return json({ ok: false, erro: 'sessao expirada' }, 401, ch);
+        const body = await safeJson(req);
+
+        // honeypot: campo invisível preenchido = bot. Responde ok e descarta.
+        if (s(body?.empresa) || s(body?.website)) {
+          return jsonResponse({ ok: true, recebido: true }, 200, ch);
         }
-        return json({
-          ok: true, token: d.access_token, refresh: d.refresh_token,
-          expira_em: d.expires_in || 3600,
-        }, 200, ch);
-      }
 
-      const auth = req.headers.get('authorization') || '';
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-      const usuario = await usuarioDoToken(token, env);
-      if (!usuario) return json({ ok: false, erro: 'nao autenticado' }, 401, ch);
+        // preenchimento humano leva mais de 2 segundos
+        const decorrido = Number(body?.tempo_ms || 0);
+        if (decorrido > 0 && decorrido < 2000) {
+          return jsonResponse({ ok: true, recebido: true }, 200, ch);
+        }
 
-      const slug = url.searchParams.get('lancamento') || '';
+        const email = s(achar(body, EMAIL_KEYS));
+        const telefone = s(achar(body, FONE_KEYS));
+        if (!email && !telefone) {
+          return jsonResponse({ ok: false, erro: 'informe e-mail ou telefone' }, 400, ch);
+        }
 
-      // -------- lançamentos
-      if (partes[1] === 'lancamentos') {
-        const dados = await db.select('lancamentos', {
-          select: 'id,slug,nome,status,captacao_inicio,carrinho_abre,carrinho_fecha,meta_leads,investimento_planejado',
-          order: 'criado_em.desc',
-        });
-        return json({ ok: true, dados }, 200, ch);
-      }
-
-      // -------- home: os 3 cards em uma chamada só
-      if (partes[1] === 'home') {
-        const periodo = url.searchParams.get('periodo') || 'mes';
-        const { inicio, fim } = intervalo(
-          periodo, url.searchParams.get('de'), url.searchParams.get('ate')
-        );
-        const dias = Number(url.searchParams.get('dias') || 30);
-
-        const [receita, captura, serie] = await Promise.all([
-          db.rpc('dash_receita', { p: { inicio, fim } }),
-          db.rpc('dash_captura', { p: { lancamento: slug } }),
-          db.rpc('dash_serie_diaria', { p: { lancamento: slug, dias } }),
-        ]);
-
-        return json({ ok: true, usuario, receita, captura, serie }, 200, ch);
-      }
-
-      // -------- lista de leads
-      if (partes[1] === 'leads') {
-        const pagina = Math.max(0, Number(url.searchParams.get('pagina') || 0));
-        const porPagina = Math.min(100, Number(url.searchParams.get('limite') || 50));
-        const etapa = url.searchParams.get('etapa') || '';
-        const busca = url.searchParams.get('busca') || '';
-
-        const filtros: Record<string, string> = {
-          select: 'id,capturado_em,etapa,lead_score,lead_tier,engenheiro,fez_quiz,entrou_grupo,'
-                + 'comprou,utm_campaign,utm_content,meta_ad_id,origem_sistema,'
-                + 'pessoas(nome,email,telefone)',
-          order: 'capturado_em.desc',
-          limit: String(porPagina),
-          offset: String(pagina * porPagina),
+        const { utm, meta, fbclid, landing_url } = extrairUtm(body);
+        const dados = {
+          lancamento: s(body?.lancamento) || env.LANCAMENTO_PADRAO,
+          email, telefone,
+          nome: s(achar(body, NOME_KEYS)),
+          origem: 'form_proprio',
+          utm, meta, fbclid, landing_url,
+          extras: {
+            user_agent: req.headers.get('user-agent') || '',
+            pais: (req as any).cf?.country || '',
+          },
+          payload: { formulario: s(body?.formulario) || 'captura' },
         };
 
-        if (slug) {
-          const lanc = await db.select('lancamentos', { select: 'id', slug: `eq.${slug}`, limit: '1' });
-          if (lanc[0]) filtros.lancamento_id = `eq.${lanc[0].id}`;
+        // 1) banco primeiro — é a fonte da verdade
+        const r = await db.rpc('ingest_lead', { p: dados });
+        if (r?.ok === false) {
+          return jsonResponse({ ok: false, erro: r.erro }, 400, ch);
         }
-        if (etapa) filtros.etapa = `eq.${etapa}`;
-        if (busca) filtros['pessoas.email'] = `ilike.*${busca}*`;
 
-        const dados = await db.select('inscricoes', filtros);
-        return json({ ok: true, dados, pagina }, 200, ch);
+        // 2) SellFlux depois, sem segurar a resposta ao lead
+        ctx.waitUntil(repassarSellflux(dados, env, db, r?.pessoa_id));
+
+        return jsonResponse({
+          ok: true, inscricao_id: r?.inscricao_id, novo: r?.novo,
+        }, 200, ch);
       }
 
-      // -------- ficha do lead
-      if (partes[1] === 'lead' && partes[2]) {
-        const id = partes[2];
-        const ficha = await db.select('inscricoes', {
-          select: '*,pessoas(nome,email,telefone,primeiro_contato)',
-          id: `eq.${id}`, limit: '1',
-        });
-        if (!ficha[0]) return json({ ok: false, erro: 'lead nao encontrado' }, 404, ch);
+      // ---------------- WEBHOOK de ferramenta
+      if (partes[0] === 'w' && req.method === 'POST') {
+        const fonte = (partes[1] || '').toLowerCase();
+        const secret = partes[2] || url.searchParams.get('k') || '';
+        if (secret !== env.WEBHOOK_SECRET) return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
+        if (!FONTES_VALIDAS.includes(fonte)) return jsonResponse({ ok: false, erro: 'fonte desconhecida' }, 400);
 
-        const [eventos, quiz] = await Promise.all([
-          db.select('eventos', {
-            select: 'tipo,ocorreu_em,fonte,payload',
-            inscricao_id: `eq.${id}`, order: 'ocorreu_em.asc', limit: '200',
-          }),
-          db.select('quiz_respostas', {
-            select: 'pergunta_chave,resposta_label,resposta_valor,pontos',
-            inscricao_id: `eq.${id}`, order: 'respondido_em.asc',
-          }),
-        ]);
+        const body = await safeJson(req);
+        const headers: Record<string, string> = {};
+        req.headers.forEach((v, k) => { headers[k] = v; });
 
-        return json({ ok: true, lead: ficha[0], eventos, quiz }, 200, ch);
+        const raw = await db.insert('webhooks_raw', { fonte, headers, body, processado: false }, 'dash');
+        const rawId = raw?.[0]?.id ?? null;
+
+        ctx.waitUntil(processar(fonte, body, rawId, db, env));
+        return jsonResponse({ ok: true, recebido: true, raw_id: rawId });
       }
 
-      return json({ ok: false, erro: 'rota nao encontrada' }, 404, ch);
+      // ---------------- REDIRECT PRO GRUPO
+      if (partes[0] === 'r' && partes[1] === 'grupo') {
+        if ((partes[2] || '') !== env.WEBHOOK_SECRET) {
+          return new Response('Link inválido.', { status: 403 });
+        }
+        const inscricaoId = url.searchParams.get('i');
+        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO;
+
+        const lanc = await db.select('lancamentos',
+          { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' }, 'dash');
+        const destino = lanc?.[0]?.config?.grupo_url;
+        if (!destino) return new Response('Grupo indisponível no momento.', { status: 404 });
+
+        if (inscricaoId) {
+          ctx.waitUntil(db.rpc('ingest_evento', {
+            p: {
+              inscricao_id: inscricaoId, tipo: 'grupo_click', fonte: 'interno',
+              lancamento: lanc[0].slug,
+              payload: { ua: req.headers.get('user-agent') || '' },
+            },
+          }).catch(() => {}));
+        }
+        return Response.redirect(destino, 302);
+      }
+
+      // ---------------- DEBUG
+      if (partes[0] === 'debug' && partes[1] === 'ultimos') {
+        if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
+        }
+        const filtros: Record<string, string> = {
+          select: 'id,fonte,recebido_em,processado,erro,body',
+          order: 'recebido_em.desc',
+          limit: url.searchParams.get('n') || '5',
+        };
+        const fonte = url.searchParams.get('fonte');
+        if (fonte) filtros.fonte = `eq.${fonte}`;
+        const dados = await db.select('webhooks_raw', filtros, 'dash');
+        return jsonResponse({ ok: true, total: dados.length, dados });
+      }
+
+      if (partes[0] === 'debug' && partes[1] === 'reprocessar' && req.method === 'POST') {
+        if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
+          return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401);
+        }
+        const pendentes = await db.select('webhooks_raw',
+          { select: 'id,fonte,body', processado: 'eq.false', order: 'recebido_em.asc', limit: '100' }, 'dash');
+        let ok = 0, falhou = 0;
+        for (const p of pendentes) {
+          try { await processar(p.fonte, p.body, p.id, db, env); ok++; } catch { falhou++; }
+        }
+        return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou });
+      }
+
+      // ============ API DA DASH ============
+      if (partes[0] === 'api') {
+        // -------- login: o front nunca fala direto com o Supabase
+        if (partes[1] === 'login' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: env.SUPABASE_ANON_KEY },
+            body: JSON.stringify({ email: corpo.email || '', password: corpo.senha || '' }),
+          });
+          const d: any = await r.json().catch(() => ({}));
+
+          if (!r.ok || !d.access_token) {
+            await new Promise((res) => setTimeout(res, 500));
+            return jsonResponse({ ok: false, erro: 'e-mail ou senha incorretos' }, 401, ch);
+          }
+          return jsonResponse({
+            ok: true,
+            token: d.access_token,
+            refresh: d.refresh_token,
+            expira_em: d.expires_in || 3600,
+            email: d.user?.email || corpo.email,
+          }, 200, ch);
+        }
+
+        // -------- renovação do token
+        if (partes[1] === 'refresh' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: env.SUPABASE_ANON_KEY },
+            body: JSON.stringify({ refresh_token: corpo.refresh || '' }),
+          });
+          const d: any = await r.json().catch(() => ({}));
+          if (!r.ok || !d.access_token) {
+            return jsonResponse({ ok: false, erro: 'sessao expirada' }, 401, ch);
+          }
+          return jsonResponse({
+            ok: true, token: d.access_token, refresh: d.refresh_token,
+            expira_em: d.expires_in || 3600,
+          }, 200, ch);
+        }
+
+        const auth = req.headers.get('authorization') || '';
+        const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+        const usuario = await usuarioDoToken(token, env);
+        if (!usuario) return jsonResponse({ ok: false, erro: 'nao autenticado' }, 401, ch);
+
+        const slug = url.searchParams.get('lancamento') || '';
+
+        // -------- lançamentos
+        if (partes[1] === 'lancamentos') {
+          const dados = await db.select('lancamentos', {
+            select: 'id,slug,nome,status,captacao_inicio,carrinho_abre,carrinho_fecha,meta_leads,investimento_planejado',
+            order: 'criado_em.desc',
+          });
+          return jsonResponse({ ok: true, dados }, 200, ch);
+        }
+
+        // -------- home: os 3 cards em uma chamada só
+        if (partes[1] === 'home') {
+          const periodo = url.searchParams.get('periodo') || 'mes';
+          const { inicio, fim } = intervalo(
+            periodo, url.searchParams.get('de'), url.searchParams.get('ate')
+          );
+          const dias = Number(url.searchParams.get('dias') || 30);
+
+          const [receita, captura, serie] = await Promise.all([
+            db.rpc('dash_receita', { p: { inicio, fim } }),
+            db.rpc('dash_captura', { p: { lancamento: slug } }),
+            db.rpc('dash_serie_diaria', { p: { lancamento: slug, dias } }),
+          ]);
+
+          return jsonResponse({ ok: true, usuario, receita, captura, serie }, 200, ch);
+        }
+
+        // -------- lista de leads
+        if (partes[1] === 'leads') {
+          const pagina = Math.max(0, Number(url.searchParams.get('pagina') || 0));
+          const porPagina = Math.min(100, Number(url.searchParams.get('limite') || 50));
+          const etapa = url.searchParams.get('etapa') || '';
+          const busca = url.searchParams.get('busca') || '';
+
+          const filtros: Record<string, string> = {
+            select: 'id,capturado_em,etapa,lead_score,lead_tier,engenheiro,fez_quiz,entrou_grupo,'
+                  + 'comprou,utm_campaign,utm_content,meta_ad_id,origem_sistema,'
+                  + 'pessoas(nome,email,telefone)',
+            order: 'capturado_em.desc',
+            limit: String(porPagina),
+            offset: String(pagina * porPagina),
+          };
+
+          if (slug) {
+            const lanc = await db.select('lancamentos', { select: 'id', slug: `eq.${slug}`, limit: '1' });
+            if (lanc[0]) filtros.lancamento_id = `eq.${lanc[0].id}`;
+          }
+          if (etapa) filtros.etapa = `eq.${etapa}`;
+          if (busca) filtros['pessoas.email'] = `ilike.*${busca}*`;
+
+          const dados = await db.select('inscricoes', filtros);
+          return jsonResponse({ ok: true, dados, pagina }, 200, ch);
+        }
+
+        // -------- ficha do lead
+        if (partes[1] === 'lead' && partes[2]) {
+          const id = partes[2];
+          const ficha = await db.select('inscricoes', {
+            select: '*,pessoas(nome,email,telefone,primeiro_contato)',
+            id: `eq.${id}`, limit: '1',
+          });
+          if (!ficha[0]) return jsonResponse({ ok: false, erro: 'lead nao encontrado' }, 404, ch);
+
+          const [eventos, quiz] = await Promise.all([
+            db.select('eventos', {
+              select: 'tipo,ocorreu_em,fonte,payload',
+              inscricao_id: `eq.${id}`, order: 'ocorreu_em.asc', limit: '200',
+            }),
+            db.select('quiz_respostas', {
+              select: 'pergunta_chave,resposta_label,resposta_valor,pontos',
+              inscricao_id: `eq.${id}`, order: 'respondido_em.asc',
+            }),
+          ]);
+
+          return jsonResponse({ ok: true, lead: ficha[0], eventos, quiz }, 200, ch);
+        }
+
+
+        return jsonResponse({ ok: false, erro: 'rota nao encontrada' }, 404, ch);
+      }
+
+      return jsonResponse({ ok: false, erro: 'rota nao encontrada' }, 404);
     } catch (e: any) {
-      return json({ ok: false, erro: String(e?.message || e) }, 500, ch);
+      return jsonResponse({ ok: false, erro: String(e?.message || e) }, 500, ch);
     }
   },
 };
