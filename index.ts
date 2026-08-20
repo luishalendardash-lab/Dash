@@ -63,7 +63,7 @@ class Supabase {
     try { return JSON.parse(texto); } catch { return texto; }
   }
 
-  async insert(tabela: string, dados: any, schema = 'public'): Promise<any> {
+  async insert(tabela: string, dados: any, schema = 'dash'): Promise<any> {
     const r = await fetch(`${this.url}/rest/v1/${tabela}`, {
       method: 'POST',
       headers: this.headers(schema, { Prefer: 'return=representation' }),
@@ -74,7 +74,7 @@ class Supabase {
     try { return JSON.parse(texto); } catch { return null; }
   }
 
-  async update(tabela: string, filtros: Record<string, string>, dados: any, schema = 'public') {
+  async update(tabela: string, filtros: Record<string, string>, dados: any, schema = 'dash') {
     const qs = new URLSearchParams(filtros).toString();
     const r = await fetch(`${this.url}/rest/v1/${tabela}?${qs}`, {
       method: 'PATCH',
@@ -85,7 +85,7 @@ class Supabase {
     return true;
   }
 
-  async select(tabela: string, filtros: Record<string, string> = {}, schema = 'public'): Promise<any[]> {
+  async select(tabela: string, filtros: Record<string, string> = {}, schema = 'dash'): Promise<any[]> {
     const qs = new URLSearchParams(filtros).toString();
     const r = await fetch(`${this.url}/rest/v1/${tabela}?${qs}`, { headers: this.headers(schema) });
     const texto = await r.text();
@@ -470,7 +470,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'unificada-v3-cors-aberto',
+            versao: 'unificada-v4',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
