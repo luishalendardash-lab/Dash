@@ -466,7 +466,27 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
   const corpo = new URLSearchParams();
   corpo.set('name', dados.nome || '');
   corpo.set('email', dados.email || '');
-  corpo.set('phone', dados.telefone || '');
+
+  // O formulário do SellFlux manda DDI e telefone em campos separados.
+  // Mandar +5553999887766 num campo só costuma virar telefone inválido
+  // do lado dele, e aí a automação de WhatsApp não encontra o contato.
+  const fone = String(dados.telefone || '');
+  if (fone.startsWith('+55')) {
+    corpo.set('ddi', '55');
+    corpo.set('phone', fone.slice(3));
+  } else if (fone.startsWith('+')) {
+    // DDI tem 1 a 3 dígitos; sem uma lista, +1 vira "12" e o número quebra
+    const so = fone.slice(1);
+    const DDIS = ['1', '351', '34', '39', '44', '49', '54', '56', '57', '58',
+                  '595', '598', '244', '258', '61', '81'];
+    const achado = DDIS.sort((a, b) => b.length - a.length)
+                       .find((d) => so.startsWith(d));
+    corpo.set('ddi', achado || so.slice(0, 2));
+    corpo.set('phone', achado ? so.slice(achado.length) : so.slice(2));
+  } else {
+    corpo.set('ddi', '55');
+    corpo.set('phone', fone.replace(/\D/g, ''));
+  }
   if (dados.utm?.source)   corpo.set('utm_source', dados.utm.source);
   if (dados.utm?.medium)   corpo.set('utm_medium', dados.utm.medium);
   if (dados.utm?.campaign) corpo.set('utm_campaign', dados.utm.campaign);
@@ -528,7 +548,20 @@ async function processar(fonte: string, body: any, rawId: number | null, db: Sup
     switch (fonte) {
       case 'sellflux':
       case 'teste':
-        resultado = await db.rpc('ingest_lead', { p: parseSellflux(body, lp, rawId) }); break;
+        resultado = await db.rpc('ingest_lead', { p: parseSellflux(body, lp, rawId) });
+        // se o aviso trouxe tags ou etapa, espelha o estado do SellFlux
+        if (fonte === 'sellflux' && (body?.tags || body?.stage_id)) {
+          await db.rpc('ingest_sellflux_estado', {
+            p: {
+              lancamento: lp,
+              email: s(achar(body, EMAIL_KEYS)),
+              telefone: s(achar(body, FONE_KEYS)),
+              tags: Array.isArray(body.tags) ? body.tags : [],
+              stage_id: body.stage_id ? String(body.stage_id) : null,
+            },
+          }).catch(() => {});
+        }
+        break;
       case 'quiz':
         resultado = await db.rpc('ingest_quiz', { p: parseQuiz(body, lp, rawId) }); break;
       case 'sendflow':
@@ -1365,7 +1398,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v21-tmb-simples',
+            versao: 'v22-sellflux',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
