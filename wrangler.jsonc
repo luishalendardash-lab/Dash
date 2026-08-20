@@ -6,17 +6,19 @@
     "enabled": true
   },
   "vars": {
-    "LANCAMENTO_PADRAO": "lanc-2026-09"
+    "LANCAMENTO_PADRAO": "lanc-2026-09",
+    "META_API_VERSAO": "v25.0"
+  },
+  "triggers": {
+    "crons": ["17 * * * *"]
   }
   // SECRETS (Settings > Variables and Secrets, tipo Secret)
   //   SUPABASE_URL          https://xxxx.supabase.co
   //   SUPABASE_SERVICE_KEY  service_role  (nunca no front)
   //   SUPABASE_ANON_KEY     anon / public
   //   WEBHOOK_SECRET        segredo que vai na URL dos webhooks
-  //   DEBUG_TOKEN           segredo das rotas /debug
-  //   SELLFLUX_ENDPOINT     opcional - URL de POST do SellFlux
-  //   MANYCHAT_WEBHOOK      opcional - webhook que repassa ao ManyChat
-  //
-  // VARIAVEL (tipo Text)
-  //   ORIGENS_PERMITIDAS    https://sua-dash.pages.dev
+  //   DEBUG_TOKEN           segredo das rotas /debug e /sync
+  //   META_TOKEN            token de usuario do sistema do Business Manager
+  //   SELLFLUX_ENDPOINT     opcional
+  //   MANYCHAT_WEBHOOK      opcional
 }

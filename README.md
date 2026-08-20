@@ -36,10 +36,9 @@ Workers & Pages > dash > Settings > Variables and Secrets
 | Nome | Valor |
 |---|---|
 | `LANCAMENTO_PADRAO` | lanc-2026-09 |
-| `ORIGENS_PERMITIDAS` | https://dashperito.pages.dev |
 
-**Sem barra no final em `ORIGENS_PERMITIDAS`.** O navegador manda a
-origem sem barra; com barra a comparação nunca bate e o login falha.
+O CORS é liberado para qualquer origem. Quem protege a dash é o login;
+as rotas de webhook exigem o segredo na URL.
 
 ### Build configuration
 | Campo | Valor |
@@ -89,7 +88,7 @@ Também é preciso, uma vez:
 
 ```
 "anon_key": true,
-"versao": "unificada-v2",
+"versao": "unificada-v4",
 "manychat": "nao configurado"
 ```
 

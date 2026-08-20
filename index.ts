@@ -419,33 +419,67 @@ async function metaTudo(caminho: string, params: Record<string, string>, env: En
     dados = dados.concat(d.data || []);
     paginas++;
   }
+  // truncou: existe mais dado do que o teto permitiu buscar
+  (dados as any).truncado = paginas >= teto && !!d?.paging?.next;
   return dados;
 }
 
 /** Sincroniza UMA conta de anúncios. */
-async function sincronizarConta(conta: string, slug: string, cfg: any, dias: number, db: Supabase, env: Env) {
+async function sincronizarConta(
+  conta: string, slug: string, cfg: any, codigo: string, dias: number, db: Supabase, env: Env
+) {
   const filtroIds: string[] = Array.isArray(cfg.meta_campanhas) ? cfg.meta_campanhas : [];
-  const prefixo: string = cfg.meta_prefixo || '';
+  // o código do lançamento é o filtro padrão; meta_prefixo só sobrescreve
+  const prefixo: string = cfg.meta_prefixo || codigo || '';
 
   // ---- campanhas
-  let campanhas = await metaTudo(`${conta}/campaigns`, { fields: 'id,name,status,objective' }, env);
-  if (filtroIds.length) campanhas = campanhas.filter((c: any) => filtroIds.includes(c.id));
-  else if (prefixo) campanhas = campanhas.filter((c: any) => (c.name || '').startsWith(prefixo));
+  // Pede ao Meta só o que contém o código, em vez de baixar a conta inteira.
+  const paramsCampanha: Record<string, string> = { fields: 'id,name,status,objective' };
+  if (prefixo && !filtroIds.length) {
+    paramsCampanha.filtering = JSON.stringify([
+      { field: 'campaign.name', operator: 'CONTAIN', value: prefixo },
+    ]);
+  }
+
+  let campanhas = await metaTudo(`${conta}/campaigns`, paramsCampanha, env);
+
+  if (filtroIds.length) {
+    campanhas = campanhas.filter((c: any) => filtroIds.includes(c.id));
+  } else if (prefixo) {
+    // CONTAIN acha no meio do nome; aqui exigimos que seja o início mesmo
+    campanhas = campanhas.filter((c: any) =>
+      (c.name || '').trim().toUpperCase().startsWith(prefixo.toUpperCase()));
+  }
 
   if (!campanhas.length) {
     return { conta, campanhas: 0, conjuntos: 0, anuncios: 0, dias_metricas: 0,
-             aviso: 'nenhuma campanha bateu com o filtro' };
+             filtro: prefixo || 'nenhum',
+             aviso: `nenhuma campanha começando com "${prefixo}" nesta conta` };
   }
   const idsCampanha = campanhas.map((c: any) => c.id);
 
-  // ---- conjuntos e anúncios das campanhas selecionadas
-  const conjuntos = (await metaTudo(`${conta}/adsets`, { fields: 'id,name,status,campaign_id' }, env))
-    .filter((a: any) => idsCampanha.includes(a.campaign_id));
-  const idsConjunto = conjuntos.map((a: any) => a.id);
+  // ---- conjuntos e anúncios
+  // Com filtro, busca POR CAMPANHA: evita varrer a conta inteira e some
+  // o risco de truncar na paginação (contas antigas têm milhares de ads).
+  let conjuntos: any[] = [];
+  let anuncios: any[] = [];
 
-  const anuncios = (await metaTudo(`${conta}/ads`,
-    { fields: 'id,name,status,adset_id,creative{id,thumbnail_url,title,body}' }, env))
-    .filter((a: any) => idsConjunto.includes(a.adset_id));
+  if (filtroIds.length || prefixo) {
+    for (const idc of idsCampanha) {
+      const cj = await metaTudo(`${idc}/adsets`, { fields: 'id,name,status,campaign_id' }, env, 5);
+      conjuntos = conjuntos.concat(cj);
+      const ad = await metaTudo(`${idc}/ads`,
+        { fields: 'id,name,status,adset_id,creative{id,thumbnail_url,title,body}' }, env, 5);
+      anuncios = anuncios.concat(ad);
+    }
+  } else {
+    conjuntos = (await metaTudo(`${conta}/adsets`, { fields: 'id,name,status,campaign_id' }, env))
+      .filter((a: any) => idsCampanha.includes(a.campaign_id));
+    const idsConj = conjuntos.map((a: any) => a.id);
+    anuncios = (await metaTudo(`${conta}/ads`,
+      { fields: 'id,name,status,adset_id,creative{id,thumbnail_url,title,body}' }, env))
+      .filter((a: any) => idsConj.includes(a.adset_id));
+  }
 
   const entidades = [
     ...campanhas.map((c: any) => ({
@@ -514,6 +548,10 @@ async function sincronizarConta(conta: string, slug: string, cfg: any, dias: num
     conjuntos: conjuntos.length,
     anuncios: anuncios.length,
     dias_metricas: insights.length,
+    filtro: filtroIds.length ? 'lista de campanhas'
+          : prefixo ? `campanhas que comecam com "${prefixo}"`
+          : 'NENHUM — a conta inteira entrou, o investido nao representa so o lancamento',
+    truncado: (anuncios as any).truncado || (campanhas as any).truncado || undefined,
   };
 }
 
@@ -527,10 +565,12 @@ async function sincronizarConta(conta: string, slug: string, cfg: any, dias: num
 async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: Env): Promise<any> {
   if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
 
-  const lanc = await db.select('lancamentos', { select: 'slug,config', slug: `eq.${slug}`, limit: '1' });
+  const lanc = await db.select('lancamentos',
+    { select: 'slug,codigo,config', slug: `eq.${slug}`, limit: '1' });
   if (!lanc[0]) return { ok: false, erro: `lancamento ${slug} nao encontrado` };
 
   const cfg = lanc[0].config || {};
+  const codigo: string = lanc[0].codigo || '';
   const contas: string[] = Array.isArray(cfg.meta_contas) && cfg.meta_contas.length
     ? cfg.meta_contas
     : (cfg.meta_account_id ? [cfg.meta_account_id] : []);
@@ -544,7 +584,7 @@ async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: En
 
   for (const conta of contas) {
     try {
-      resultados.push(await sincronizarConta(conta, slug, cfg, dias, db, env));
+      resultados.push(await sincronizarConta(conta, slug, cfg, codigo, dias, db, env));
     } catch (e: any) {
       erros.push({ conta, erro: String(e?.message || e).slice(0, 300) });
     }
@@ -554,6 +594,7 @@ async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: En
 
   return {
     ok: erros.length < contas.length,   // falha só se TODAS as contas falharem
+    codigo: codigo || '(sem codigo — rode o 08_codigo_lancamento.sql)',
     contas: resultados,
     erros: erros.length ? erros : undefined,
     gasto_total: total?.gasto_total ?? 0,
@@ -642,7 +683,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v6-meta-multiconta',
+            versao: 'v8-codigo-lancamento',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -834,9 +875,15 @@ export default {
         const slug = url.searchParams.get('lancamento') || '';
 
         // -------- lançamentos
+        if (partes[1] === 'lancamentos' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('criar_lancamento', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
         if (partes[1] === 'lancamentos') {
           const dados = await db.select('lancamentos', {
-            select: 'id,slug,nome,status,captacao_inicio,carrinho_abre,carrinho_fecha,meta_leads,investimento_planejado',
+            select: 'id,slug,codigo,nome,status,captacao_inicio,carrinho_abre,carrinho_fecha,meta_leads,investimento_planejado',
             order: 'criado_em.desc',
           });
           return jsonResponse({ ok: true, dados }, 200, ch);
