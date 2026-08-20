@@ -1398,7 +1398,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v22-sellflux',
+            versao: 'v23-aulas-manual',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1774,6 +1774,26 @@ export default {
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
+        if (partes[1] === 'aulas' && req.method === 'GET') {
+          const r = await db.rpc('dash_aulas', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'aulas-historico') {
+          const r = await db.rpc('dash_aulas_historico', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'aula' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          if (partes[2] === 'apagar') {
+            const r = await db.rpc('apagar_aula', { p: corpo });
+            return jsonResponse(r, 200, ch);
+          }
+          const r = await db.rpc('salvar_aula', { p: { ...corpo, lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
         if (partes[1] === 'vendas') {
           const r = await db.rpc('dash_vendas', { p: { lancamento: slug } });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
@@ -1848,9 +1868,10 @@ export default {
     }
   },
 
-  // Cron: sincroniza o Meta de hora em hora, para todo lançamento em andamento.
+  // Cron de hora em hora: Meta Ads e reconciliação de vendas.
   async scheduled(_evento: ScheduledController, env: Env, ctx: ExecutionContext) {
     const db = new Supabase(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+
     ctx.waitUntil((async () => {
       try {
         const ativos = await db.select('lancamentos', {
