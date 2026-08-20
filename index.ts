@@ -1398,7 +1398,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v23-aulas-manual',
+            versao: 'v26-ajustes',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1690,10 +1690,21 @@ export default {
         if (!usuario) return jsonResponse({ ok: false, erro: 'nao autenticado' }, 401, ch);
 
         const slug = url.searchParams.get('lancamento') || '';
+        // filtro de produtos vem como ?produtos=A|B|C
+        const produtos = (url.searchParams.get('produtos') || '')
+          .split('|').map((x) => x.trim()).filter(Boolean);
 
         // -------- lançamentos
         if (partes[1] === 'quiz' && req.method === 'GET') {
           const r = await db.rpc('quiz_admin', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'quiz-copiar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('copiar_quiz', {
+            p: { destino: slug, origem: corpo.origem || null },
+          });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
@@ -1739,7 +1750,7 @@ export default {
           const dias = Number(url.searchParams.get('dias') || 30);
 
           const [receita, captura, serie] = await Promise.all([
-            db.rpc('dash_receita', { p: { inicio, fim } }),
+            db.rpc('dash_receita', { p: { inicio, fim, produtos } }),
             db.rpc('dash_captura', { p: { lancamento: slug } }),
             db.rpc('dash_serie_diaria', { p: { lancamento: slug, dias } }),
           ]);
@@ -1795,8 +1806,47 @@ export default {
         }
 
         if (partes[1] === 'vendas') {
-          const r = await db.rpc('dash_vendas', { p: { lancamento: slug } });
+          const r = await db.rpc('dash_vendas', { p: { lancamento: slug, produtos } });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'ajustes' && req.method === 'GET') {
+          const r = await db.rpc('dash_ajustes', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'ajustes' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const alvo = partes[2] || '';
+
+          if (alvo === 'config') {
+            const r = await db.rpc('salvar_config', { p: corpo });
+            return jsonResponse(r, 200, ch);
+          }
+          if (alvo === 'plataforma') {
+            const r = await db.rpc('salvar_plataforma', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'lancamento') {
+            const r = await db.rpc('salvar_lancamento', {
+              p: { ...corpo, lancamento: corpo.lancamento || slug },
+            });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'zerar') {
+            const r = await db.rpc('zerar_lancamento', {
+              p: { ...corpo, lancamento: corpo.lancamento || slug },
+            });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          return jsonResponse({ ok: false, erro: 'ajuste desconhecido' }, 400, ch);
+        }
+
+        if (partes[1] === 'produtos') {
+          const r = await db.rpc('dash_produtos', {
+            p: url.searchParams.get('todos') ? {} : { lancamento: slug },
+          });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'reconciliar' && req.method === 'POST') {

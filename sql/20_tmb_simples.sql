@@ -22,9 +22,14 @@ alter table dash.vendas
   drop column if exists valor_contratado,
   drop column if exists parcelas_pagas;
 
--- valor_recebido fica: é o "pago" que interessa
+-- quanto o comprador já pagou. Em plataforma à vista, igual ao bruto.
+-- (o arquivo 19 foi descartado, então a coluna pode não existir ainda)
+alter table dash.vendas
+  add column if not exists valor_recebido numeric(14,2) not null default 0,
+  add column if not exists parcelas_total int;
+
 comment on column dash.vendas.valor_recebido is
-  'Quanto o comprador já pagou. Em plataforma à vista é igual ao valor_bruto.';
+  'Quanto o comprador ja pagou. Em plataforma a vista e igual ao valor_bruto.';
 
 -- ---------------------------------------------------------------------
 -- 2. ATUALIZAR O PAGO

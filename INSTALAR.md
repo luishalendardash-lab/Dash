@@ -30,10 +30,16 @@ Pode rodar de novo sem medo: todos são feitos para repetir sem quebrar nada.
 | 17 | `17_tmb.sql` | TMB |
 | 18 | `18_tmb_webhook.sql` | TMB por webhook |
 | 20 | `20_tmb_simples.sql` | TMB: faturado e pago |
+| 21 | `21_aulas.sql` | diário de bordo das aulas |
+| 22 | `22_vendas_sck.sql` | origem do link e série diária |
+| 23 | `23_produtos.sql` | filtro e quebra por produto |
+| 24 | `24_correcoes.sql` | copiar quiz, CPL sem investimento |
+| 25 | `25_conserta_home.sql` | conserta a Home |
+| 26 | `26_ajustes.sql` | tela de ajustes |
 
-Não existe arquivo 19 — ele foi substituído pelo 20.
+Não existe arquivo 19 — foi substituído pelo 20.
 
-**Se você já rodou até o 14 antes**, precisa rodar do 15 ao 20 agora.
+Os 25 arquivos foram executados numa instalação limpa antes desta entrega.
 
 ### Uma vez só, no painel do Supabase
 
@@ -84,7 +90,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v21-tmb-simples"
+"versao": "v26-ajustes"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.
@@ -127,8 +133,29 @@ formulário atual.
 
 ---
 
-## O que ainda não existe
+## Antes de entrar em operação
 
-- Tela de **Aulas / YouTube**
-- Tela de **Ajustes** (imposto, metas e plataformas ainda são editados por SQL)
-- Limpeza final dos dados de teste
+Na aba **Ajustes**, o painel "Estado da operação" mostra o que falta.
+Além dele, três coisas:
+
+**1. Trocar os dois segredos.** `WEBHOOK_SECRET` e `DEBUG_TOKEN` estão com
+valores fracos e apareceram em conversa. Gere strings aleatórias novas no
+Worker e **atualize as URLs nas plataformas** — elas contêm o segredo.
+
+**2. Zerar os dados de teste.** Ajustes → Limpar dados de teste.
+Apaga leads e vendas, mantém quiz, integrações e configurações.
+
+**3. Teste ponta a ponta.** Um lead pelo formulário real, passando pelo
+quiz até o grupo, conferindo se chegou nas três pontas: dash, SellFlux e
+ManyChat.
+
+## Rotina de cada lançamento
+
+1. Criar o lançamento (gera o código, ex: `L2610`)
+2. Ajustes → metas, link do grupo novo, contas do Meta
+3. Quiz → copiar do anterior e revisar
+4. Copiar as duas linhas e trocar o formulário na LP
+5. Colocar o código no início do nome das campanhas, nas duas contas
+6. Cadastrar as aulas
+
+As integrações **não** precisam ser refeitas: valem para sempre.
