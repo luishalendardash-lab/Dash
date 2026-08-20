@@ -27,7 +27,6 @@ interface Env {
   WEBHOOK_SECRET: string;
   DEBUG_TOKEN: string;
   LANCAMENTO_PADRAO?: string;
-  ORIGENS_PERMITIDAS?: string;   // "https://sua-dash.pages.dev,https://captura.seudominio.com"
   SELLFLUX_ENDPOINT?: string;
   SELLFLUX_TOKEN?: string;
   MANYCHAT_WEBHOOK?: string;
@@ -105,19 +104,15 @@ function jsonResponse(dados: any, status = 200, extraHeaders: Record<string, str
   });
 }
 
-function corsHeaders(origem: string | null, env: Env): Record<string, string> {
-  const lista = (env.ORIGENS_PERMITIDAS || '')
-    .split(',').map((o) => o.trim()).filter(Boolean);
-
-  const permitido = lista.length === 0 ? (origem || '*')
-                  : (origem && lista.includes(origem) ? origem : '');
-
-  if (!permitido) return {};
+function corsHeaders(origem: string | null): Record<string, string> {
+  // Liberado para qualquer origem. Quem protege a dash é o login, e as
+  // rotas de webhook exigem o segredo na URL. Manter uma lista aqui só
+  // criava quebra silenciosa toda vez que um domínio mudava.
   return {
-    'Access-Control-Allow-Origin': permitido,
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Origin': origem || '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '600',
     'Vary': 'Origin',
   };
 }
@@ -460,7 +455,7 @@ export default {
     const partes = url.pathname.split('/').filter(Boolean);
     const db = new Supabase(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
     const origem = req.headers.get('origin');
-    const ch = corsHeaders(origem, env);
+    const ch = corsHeaders(origem);
 
     try {
       if (req.method === 'OPTIONS') {
@@ -475,11 +470,10 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'unificada-v2',
+            versao: 'unificada-v3-cors-aberto',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
-            origens_permitidas: env.ORIGENS_PERMITIDAS || 'todas (feche antes de rodar trafego)',
             sellflux_endpoint: env.SELLFLUX_ENDPOINT ? 'configurado' : 'nao configurado',
           },
         });
@@ -487,11 +481,6 @@ export default {
 
       // ---------------- CAPTURA (formulário próprio)
       if (partes[0] === 'captura' && req.method === 'POST') {
-        const lista = (env.ORIGENS_PERMITIDAS || '').split(',').map((o) => o.trim()).filter(Boolean);
-        if (lista.length > 0 && (!origem || !lista.includes(origem))) {
-          return jsonResponse({ ok: false, erro: 'origem nao permitida' }, 403, ch);
-        }
-
         const body = await safeJson(req);
 
         // honeypot: campo invisível preenchido = bot. Responde ok e descarta.
