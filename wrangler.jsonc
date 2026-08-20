@@ -1,17 +1,14 @@
 {
-  "name": "dash-ingest",
+  "name": "dash-api",
   "main": "index.ts",
   "compatibility_date": "2026-06-01",
   "observability": {
     "enabled": true
-  },
-  "vars": {
-    "LANCAMENTO_PADRAO": "lanc-2026-09"
   }
-  // SECRETS — nunca aqui. Cadastre no painel do Cloudflare:
-  // Workers & Pages > dash-ingest > Settings > Variables and Secrets
+  // SECRETS (Workers & Pages > dash-api > Settings > Variables and Secrets)
   //   SUPABASE_URL          https://xxxx.supabase.co
-  //   SUPABASE_SERVICE_KEY  service_role key (Supabase > Settings > API)
-  //   WEBHOOK_SECRET        string aleatoria longa - vai na URL do webhook
-  //   DEBUG_TOKEN           outra string aleatoria, so sua
+  //   SUPABASE_SERVICE_KEY  service_role key  (Settings > API)
+  //   SUPABASE_ANON_KEY     anon / publishable key
+  // VARIAVEL (tipo Text)
+  //   ORIGENS_PERMITIDAS    https://sua-dash.pages.dev
 }
