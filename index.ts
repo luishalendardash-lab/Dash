@@ -437,7 +437,7 @@ function widgetJS(slug: string, base: string): string {
     'box-shadow:0 0 0 3px rgba(143,216,171,.25);background:rgba(0,0,0,.42)}',
     '#pd-captura input.pd-ruim{border-color:#ff6b6b;box-shadow:0 0 0 3px rgba(255,107,107,.18)}',
     '#pd-captura .pd-linha{display:flex;gap:8px;align-items:center}',
-    '#pd-captura .pd-ddi{min-width:80px;max-width:92px;appearance:none;',
+    '#pd-captura .pd-ddi{min-width:92px;max-width:104px;appearance:none;padding-right:22px;',
     'background-image:linear-gradient(45deg,transparent 50%,#fff 50%),linear-gradient(135deg,#fff 50%,transparent 50%);',
     'background-position:right 10px top 16px,right 6px top 16px;background-size:6px 6px;background-repeat:no-repeat}',
     '#pd-captura .pd-tel{flex:1}',
@@ -490,6 +490,27 @@ function widgetJS(slug: string, base: string): string {
     if(v){ trk[c] = v; try{ sessionStorage.setItem('trk_'+c, v); }catch(e){} }
   });
 
+  // bandeira, DDI e formato do número. A máscara usa 0 como dígito.
+  var PAISES = [
+    {ddi:'55',  bandeira:'\uD83C\uDDE7\uD83C\uDDF7', mascara:'(00) 00000-0000'},
+    {ddi:'1',   bandeira:'\uD83C\uDDFA\uD83C\uDDF8', mascara:'(000) 000-0000'},
+    {ddi:'351', bandeira:'\uD83C\uDDF5\uD83C\uDDF9', mascara:'000 000 000'},
+    {ddi:'34',  bandeira:'\uD83C\uDDEA\uD83C\uDDF8', mascara:'000 000 000'},
+    {ddi:'39',  bandeira:'\uD83C\uDDEE\uD83C\uDDF9', mascara:'000 000 0000'},
+    {ddi:'44',  bandeira:'\uD83C\uDDEC\uD83C\uDDE7', mascara:'00000 000000'},
+    {ddi:'49',  bandeira:'\uD83C\uDDE9\uD83C\uDDEA', mascara:'0000 0000000'},
+    {ddi:'54',  bandeira:'\uD83C\uDDE6\uD83C\uDDF7', mascara:'(00) 0000-0000'},
+    {ddi:'56',  bandeira:'\uD83C\uDDE8\uD83C\uDDF1', mascara:'0 0000 0000'},
+    {ddi:'57',  bandeira:'\uD83C\uDDE8\uD83C\uDDF4', mascara:'000 000 0000'},
+    {ddi:'58',  bandeira:'\uD83C\uDDFB\uD83C\uDDEA', mascara:'000-0000000'},
+    {ddi:'595', bandeira:'\uD83C\uDDF5\uD83C\uDDFE', mascara:'000 000000'},
+    {ddi:'598', bandeira:'\uD83C\uDDFA\uD83C\uDDFE', mascara:'0 000 0000'},
+    {ddi:'244', bandeira:'\uD83C\uDDE6\uD83C\uDDF4', mascara:'000 000 000'},
+    {ddi:'258', bandeira:'\uD83C\uDDF2\uD83C\uDDFF', mascara:'00 000 0000'},
+    {ddi:'61',  bandeira:'\uD83C\uDDE6\uD83C\uDDFA', mascara:'000 000 000'},
+    {ddi:'81',  bandeira:'\uD83C\uDDEF\uD83C\uDDF5', mascara:'00 0000 0000'}
+  ];
+
   var inicio = Date.now();
   var inscricaoId = null;
   var perguntas = [], visiveis = [], respostas = {}, atual = 0, grupoUrl = null;
@@ -507,10 +528,12 @@ function widgetJS(slug: string, base: string): string {
       + 'inputmode="email" spellcheck="false" autocapitalize="off"></div>'
       + '<div class="pd-linha"><label for="pd-ddi" class="pd-sr">DDI</label>'
       + '<select id="pd-ddi" class="pd-ddi">'
-      + ['55','1','351','34','39','44','49','54','56','57','58','595','598','244','258','61','81']
-          .map(function(d,i){ return '<option value="'+d+'"'+(i===0?' selected':'')+'>+'+d+'</option>'; }).join('')
+      + PAISES.map(function(p,i){
+          return '<option value="'+p.ddi+'" data-mascara="'+p.mascara+'"'+(i===0?' selected':'')
+               + '>'+p.bandeira+' +'+p.ddi+'</option>';
+        }).join('')
       + '</select><label for="pd-tel" class="pd-sr">WhatsApp</label>'
-      + '<input id="pd-tel" type="tel" maxlength="19" placeholder="Whatsapp com DDD" class="pd-tel" '
+      + '<input id="pd-tel" type="tel" maxlength="19" placeholder="(00) 00000-0000" class="pd-tel" '
       + 'autocomplete="tel" inputmode="tel"></div>'
       + '<div class="pd-sr" aria-hidden="true"><input id="pd-empresa" type="text" tabindex="-1" autocomplete="off"></div>'
       + '<button type="button" id="pd-enviar" class="pd-btn">'+esc(COR.botao)+'</button>'
@@ -524,12 +547,40 @@ function widgetJS(slug: string, base: string): string {
       c.addEventListener('keydown', function(ev){ if(ev.key === 'Enter') enviarForm(); });
     });
 
+    function mascaraAtual(){
+      var op = ddi.options[ddi.selectedIndex];
+      return (op && op.dataset.mascara) || '(00) 00000-0000';
+    }
+
+    /** Aplica o formato do país escolhido, dígito a dígito. */
+    function formatar(valor, molde){
+      var d = valor.replace(/\\D/g,'');
+
+      // Brasil tem dois formatos: fixo (10 dígitos) e celular (11)
+      if(ddi.value === '55'){
+        d = d.slice(0, 11);
+        molde = d.length <= 10 ? '(00) 0000-0000' : '(00) 00000-0000';
+      }
+
+      var limite = (molde.match(/0/g) || []).length;
+      d = d.slice(0, limite);
+      var saida = '', i = 0;
+      for(var k = 0; k < molde.length && i < d.length; k++){
+        saida += molde[k] === '0' ? d[i++] : molde[k];
+      }
+      return saida;
+    }
+
     tel.addEventListener('input', function(e){
-      if(ddi.value !== '55') return;
-      var d = e.target.value.replace(/\\D/g,'').slice(0,11), s = d;
-      if(d.length > 2) s = '(' + d.slice(0,2) + ') ' + d.slice(2);
-      if(d.length > 7) s = '(' + d.slice(0,2) + ') ' + d.slice(2,7) + '-' + d.slice(7);
-      e.target.value = s;
+      e.target.value = formatar(e.target.value, mascaraAtual());
+    });
+
+    // troca de país refaz o formato e o exemplo
+    ddi.addEventListener('change', function(){
+      var m = mascaraAtual();
+      tel.placeholder = m;
+      tel.value = formatar(tel.value, m);
+      tel.classList.remove('pd-ruim');
     });
 
     q('pd-enviar').addEventListener('click', enviarForm);
@@ -552,7 +603,8 @@ function widgetJS(slug: string, base: string): string {
     var ruim = false;
     if(vNome.length < 2){ nome.classList.add('pd-ruim'); ruim = true; }
     if(!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(vEmail)){ email.classList.add('pd-ruim'); ruim = true; }
-    if(vTel.length < 10){ tel.classList.add('pd-ruim'); ruim = true; }
+    var minimo = ddi.value === '55' ? 10 : 6;
+    if(vTel.length < minimo){ tel.classList.add('pd-ruim'); ruim = true; }
     if(ruim){ erroForm('Confira os campos destacados para continuar.'); return; }
 
     var b = q('pd-enviar');
@@ -1026,7 +1078,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v13-embed',
+            versao: 'v14-form',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
