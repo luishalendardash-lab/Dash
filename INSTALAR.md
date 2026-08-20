@@ -36,10 +36,11 @@ Pode rodar de novo sem medo: todos são feitos para repetir sem quebrar nada.
 | 24 | `24_correcoes.sql` | copiar quiz, CPL sem investimento |
 | 25 | `25_conserta_home.sql` | conserta a Home |
 | 26 | `26_ajustes.sql` | tela de ajustes |
+| 27 | `27_custos.sql` | impostos e custos configuráveis |
 
 Não existe arquivo 19 — foi substituído pelo 20.
 
-Os 25 arquivos foram executados numa instalação limpa antes desta entrega.
+Os 26 arquivos foram executados numa instalação limpa antes desta entrega.
 
 ### Uma vez só, no painel do Supabase
 
@@ -90,7 +91,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v26-ajustes"
+"versao": "v27-custos"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.

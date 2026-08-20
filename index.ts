@@ -1398,7 +1398,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v26-ajustes',
+            versao: 'v27-custos',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1821,6 +1821,14 @@ export default {
 
           if (alvo === 'config') {
             const r = await db.rpc('salvar_config', { p: corpo });
+            return jsonResponse(r, 200, ch);
+          }
+          if (alvo === 'custo') {
+            const r = await db.rpc('salvar_custo', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'custo-apagar') {
+            const r = await db.rpc('apagar_custo', { p: corpo });
             return jsonResponse(r, 200, ch);
           }
           if (alvo === 'plataforma') {
