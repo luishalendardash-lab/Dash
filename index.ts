@@ -390,6 +390,319 @@ async function processar(fonte: string, body: any, rawId: number | null, db: Sup
   }
 }
 
+
+// =====================================================================
+// WIDGET DA LP — /embed.js?l=slug
+// O cliente cola duas linhas na landing:
+//   <div id="pd-captura"></div>
+//   <script src=".../embed.js?l=lanc-2026-09"></script>
+//
+// O widget faz captura e quiz na MESMA página, trocando de seção sem
+// recarregar. Como as perguntas vêm da API em tempo real, mexer no quiz
+// pela dash muda a página do cliente sem tocar no código dele.
+// =====================================================================
+function widgetJS(slug: string, base: string): string {
+  return `(function(){
+  var LANC = ${JSON.stringify(slug)};
+  var API  = ${JSON.stringify(base)};
+  var alvo = document.getElementById('pd-captura');
+  if(!alvo) { console.warn('[dash] falta <div id="pd-captura"></div>'); return; }
+
+  var cfg = alvo.dataset || {};
+  var COR = {
+    dourado: cfg.dourado || '#FDE296',
+    douradoEscuro: cfg.douradoEscuro || '#DAA520',
+    verde1: cfg.verde1 || '#00DE00',
+    verde2: cfg.verde2 || '#009500',
+    menta: cfg.menta || '#8fd8ab',
+    botao: cfg.textoBotao || 'QUERO PARTICIPAR DA AULA GRATUITA'
+  };
+
+  // ---------- estilo (escopado no widget) ----------
+  var css = document.createElement('style');
+  css.textContent = [
+    '#pd-captura{--pd-dourado:'+COR.dourado+';--pd-dourado-escuro:'+COR.douradoEscuro+';',
+    '--pd-verde1:'+COR.verde1+';--pd-verde2:'+COR.verde2+';--pd-menta:'+COR.menta+';',
+    "--pd-sans:'Jost',-apple-system,BlinkMacSystemFont,sans-serif;",
+    'width:100%;max-width:520px;margin-inline:auto;font-family:var(--pd-sans);color:#fff;text-align:left}',
+    '#pd-captura *{box-sizing:border-box}',
+    '#pd-captura .pd-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}',
+    '#pd-captura .pd-campo,#pd-captura .pd-linha{margin-bottom:6px}',
+    '#pd-captura input,#pd-captura select,#pd-captura textarea{display:block;width:100%;height:38px;padding:0 10px;',
+    'font-size:14px;color:#fff;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.35);',
+    'border-radius:6px;outline:none;font-family:var(--pd-sans);transition:border-color .2s,box-shadow .2s,background .2s}',
+    '#pd-captura textarea{height:auto;min-height:104px;padding:12px 14px;line-height:1.5;resize:vertical}',
+    '#pd-captura input::placeholder,#pd-captura textarea::placeholder{color:rgba(255,255,255,.7)}',
+    '#pd-captura input:focus,#pd-captura select:focus,#pd-captura textarea:focus{border-color:var(--pd-menta);',
+    'box-shadow:0 0 0 3px rgba(143,216,171,.25);background:rgba(0,0,0,.42)}',
+    '#pd-captura input.pd-ruim{border-color:#ff6b6b;box-shadow:0 0 0 3px rgba(255,107,107,.18)}',
+    '#pd-captura .pd-linha{display:flex;gap:8px;align-items:center}',
+    '#pd-captura .pd-ddi{min-width:80px;max-width:92px;appearance:none;',
+    'background-image:linear-gradient(45deg,transparent 50%,#fff 50%),linear-gradient(135deg,#fff 50%,transparent 50%);',
+    'background-position:right 10px top 16px,right 6px top 16px;background-size:6px 6px;background-repeat:no-repeat}',
+    '#pd-captura .pd-tel{flex:1}',
+    '#pd-captura .pd-btn{width:100%;padding:12px 18px;margin-top:8px;font-size:14px;font-weight:800;',
+    'text-transform:uppercase;color:#fff;border:none;border-radius:10px;cursor:pointer;line-height:1.3;',
+    'font-family:var(--pd-sans);background:linear-gradient(90deg,var(--pd-verde1) 0%,var(--pd-verde2) 100%)}',
+    '#pd-captura .pd-btn:hover:not(:disabled){filter:brightness(1.06)}',
+    '#pd-captura .pd-btn:disabled{opacity:.65;cursor:default}',
+    '#pd-captura .pd-erro{display:none;margin-top:10px;padding:9px 12px;border-radius:8px;',
+    'background:rgba(255,107,107,.12);border:1px solid rgba(255,107,107,.4);color:#ffb3b3;font-size:13px;text-align:center}',
+    '#pd-captura .pd-erro.on{display:block}',
+    '#pd-captura .pd-barra{height:5px;background:rgba(255,255,255,.14);border-radius:99px;overflow:hidden;margin-bottom:18px}',
+    '#pd-captura .pd-barra i{display:block;height:100%;width:0;border-radius:99px;',
+    'background:linear-gradient(90deg,var(--pd-dourado-escuro),var(--pd-dourado));transition:width .35s cubic-bezier(.4,0,.2,1)}',
+    '#pd-captura .pd-passo{font-size:11.5px;color:var(--pd-dourado);font-weight:600;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px}',
+    '#pd-captura .pd-pergunta{font-size:20px;font-weight:700;line-height:1.3;margin:0 0 6px}',
+    '#pd-captura .pd-ajuda{font-size:14px;color:rgba(255,255,255,.78);margin-bottom:16px}',
+    '#pd-captura .pd-opcoes{display:flex;flex-direction:column;gap:8px}',
+    '#pd-captura .pd-opcao{display:flex;align-items:center;gap:12px;padding:14px 15px;background:rgba(0,0,0,.35);',
+    'border:1px solid rgba(255,255,255,.22);border-radius:8px;cursor:pointer;font-size:15px;color:#fff;',
+    'text-align:left;width:100%;font-family:var(--pd-sans);transition:border-color .18s,background .18s}',
+    '#pd-captura .pd-opcao:hover{border-color:rgba(255,255,255,.45);background:rgba(0,0,0,.45)}',
+    '#pd-captura .pd-opcao.sel{border-color:var(--pd-dourado);background:rgba(253,226,150,.1)}',
+    '#pd-captura .pd-marca{width:20px;height:20px;border-radius:50%;border:1.5px solid rgba(255,255,255,.45);flex-shrink:0;display:grid;place-items:center}',
+    '#pd-captura .pd-opcao.sel .pd-marca{border-color:var(--pd-dourado)}',
+    '#pd-captura .pd-opcao.sel .pd-marca::after{content:"";width:9px;height:9px;border-radius:50%;background:var(--pd-dourado)}',
+    '#pd-captura .pd-voltar{background:none;border:none;color:rgba(255,255,255,.5);font-size:13.5px;',
+    'cursor:pointer;font-family:var(--pd-sans);padding:10px 2px 0;font-weight:500}',
+    '#pd-captura .pd-voltar:hover{color:var(--pd-dourado)}',
+    '#pd-captura .pd-fim{text-align:center;padding:12px 0}',
+    '#pd-captura .pd-fim .pd-emoji{font-size:44px;margin-bottom:10px}',
+    '#pd-captura .pd-fim h3{font-size:22px;font-weight:700;color:var(--pd-dourado);margin:0 0 8px}',
+    '#pd-captura .pd-fim p{color:rgba(255,255,255,.78);font-size:15px;margin-bottom:20px}',
+    '#pd-captura .pd-fim a{color:var(--pd-dourado)}',
+    '#pd-captura .pd-fade{animation:pdFade .28s ease}',
+    '@keyframes pdFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}',
+    '@media(max-width:600px){#pd-captura .pd-linha{gap:6px}#pd-captura .pd-ddi{min-width:72px;max-width:85px}',
+    '#pd-captura .pd-pergunta{font-size:18.5px}}'
+  ].join('');
+  document.head.appendChild(css);
+
+  // ---------- rastreio ----------
+  var CAMPOS = ['utm_source','utm_medium','utm_campaign','utm_content','utm_term',
+                'cid','aid','adid','fbclid','sck','gclid'];
+  var trk = {};
+  var qs = new URLSearchParams(location.search);
+  CAMPOS.forEach(function(c){
+    var v = qs.get(c);
+    if(!v){ try{ v = sessionStorage.getItem('trk_'+c); }catch(e){} }
+    if(v){ trk[c] = v; try{ sessionStorage.setItem('trk_'+c, v); }catch(e){} }
+  });
+
+  var inicio = Date.now();
+  var inscricaoId = null;
+  var perguntas = [], visiveis = [], respostas = {}, atual = 0, grupoUrl = null;
+
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+  function pinta(html){ alvo.innerHTML = '<div class="pd-fade">'+html+'</div>'; }
+
+  // ---------- formulário ----------
+  function telaForm(){
+    pinta(
+      '<div class="pd-campo"><label for="pd-nome" class="pd-sr">Nome</label>'
+      + '<input id="pd-nome" type="text" placeholder="Insira seu nome" autocomplete="name"></div>'
+      + '<div class="pd-campo"><label for="pd-email" class="pd-sr">E-mail</label>'
+      + '<input id="pd-email" type="email" placeholder="Seu melhor Email" autocomplete="email" '
+      + 'inputmode="email" spellcheck="false" autocapitalize="off"></div>'
+      + '<div class="pd-linha"><label for="pd-ddi" class="pd-sr">DDI</label>'
+      + '<select id="pd-ddi" class="pd-ddi">'
+      + ['55','1','351','34','39','44','49','54','56','57','58','595','598','244','258','61','81']
+          .map(function(d,i){ return '<option value="'+d+'"'+(i===0?' selected':'')+'>+'+d+'</option>'; }).join('')
+      + '</select><label for="pd-tel" class="pd-sr">WhatsApp</label>'
+      + '<input id="pd-tel" type="tel" maxlength="19" placeholder="Whatsapp com DDD" class="pd-tel" '
+      + 'autocomplete="tel" inputmode="tel"></div>'
+      + '<div class="pd-sr" aria-hidden="true"><input id="pd-empresa" type="text" tabindex="-1" autocomplete="off"></div>'
+      + '<button type="button" id="pd-enviar" class="pd-btn">'+esc(COR.botao)+'</button>'
+      + '<div class="pd-erro" id="pd-erro"></div>'
+    );
+
+    var nome = q('pd-nome'), email = q('pd-email'), tel = q('pd-tel'), ddi = q('pd-ddi');
+
+    [nome, email, tel].forEach(function(c){
+      c.addEventListener('input', function(){ c.classList.remove('pd-ruim'); q('pd-erro').classList.remove('on'); });
+      c.addEventListener('keydown', function(ev){ if(ev.key === 'Enter') enviarForm(); });
+    });
+
+    tel.addEventListener('input', function(e){
+      if(ddi.value !== '55') return;
+      var d = e.target.value.replace(/\\D/g,'').slice(0,11), s = d;
+      if(d.length > 2) s = '(' + d.slice(0,2) + ') ' + d.slice(2);
+      if(d.length > 7) s = '(' + d.slice(0,2) + ') ' + d.slice(2,7) + '-' + d.slice(7);
+      e.target.value = s;
+    });
+
+    q('pd-enviar').addEventListener('click', enviarForm);
+  }
+
+  function q(id){ return document.getElementById(id); }
+
+  function erroForm(msg){
+    var e = q('pd-erro');
+    if(e){ e.textContent = msg; e.classList.add('on'); }
+    var b = q('pd-enviar');
+    if(b){ b.disabled = false; b.textContent = COR.botao; }
+  }
+
+  async function enviarForm(){
+    var nome = q('pd-nome'), email = q('pd-email'), tel = q('pd-tel'), ddi = q('pd-ddi');
+    q('pd-erro').classList.remove('on');
+
+    var vNome = nome.value.trim(), vEmail = email.value.trim(), vTel = tel.value.replace(/\\D/g,'');
+    var ruim = false;
+    if(vNome.length < 2){ nome.classList.add('pd-ruim'); ruim = true; }
+    if(!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(vEmail)){ email.classList.add('pd-ruim'); ruim = true; }
+    if(vTel.length < 10){ tel.classList.add('pd-ruim'); ruim = true; }
+    if(ruim){ erroForm('Confira os campos destacados para continuar.'); return; }
+
+    var b = q('pd-enviar');
+    b.disabled = true; b.textContent = 'ENVIANDO…';
+
+    var corpo = Object.assign({}, trk, {
+      nome: vNome, email: vEmail,
+      telefone: ddi.value === '55' ? vTel : ddi.value + vTel,
+      ddi: ddi.value,
+      empresa: q('pd-empresa').value,
+      lancamento: LANC,
+      formulario: 'lp-embed',
+      pagina_origem: location.href,
+      tempo_ms: Date.now() - inicio
+    });
+
+    try{
+      var r = await fetch(API + '/captura', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(corpo)
+      });
+      var d = await r.json();
+      if(!d.ok){ erroForm(d.erro || 'Não foi possível concluir. Tente novamente.'); return; }
+
+      inscricaoId = d.inscricao_id || null;
+      if(typeof fbq === 'function'){ try{ fbq('track','Lead'); }catch(e){} }
+      if(window.dataLayer){ try{ window.dataLayer.push({event:'lead_capturado'}); }catch(e){} }
+
+      alvo.scrollIntoView({behavior:'smooth', block:'center'});
+      iniciarQuiz();
+    }catch(e){
+      erroForm('Falha de conexão. Verifique sua internet e tente de novo.');
+    }
+  }
+
+  // ---------- quiz, na mesma página ----------
+  async function iniciarQuiz(){
+    pinta('<div class="pd-fim"><p>Só mais um passo…</p></div>');
+    try{
+      var r = await fetch(API + '/quiz?l=' + encodeURIComponent(LANC));
+      var d = await r.json();
+      if(!d.ok || !d.perguntas || !d.perguntas.length){ finalizar(); return; }
+      perguntas = d.perguntas;
+      recalcular();
+      var intro = d.intro || {};
+      if(intro.titulo || intro.texto) telaIntro(intro); else desenhar();
+    }catch(e){ finalizar(); }
+  }
+
+  function telaIntro(intro){
+    pinta(
+      '<div class="pd-fim" style="text-align:left">'
+      + '<h3 style="font-size:24px;margin-bottom:12px">'+esc(intro.titulo || 'Falta pouco')+'</h3>'
+      + (intro.texto ? '<p style="text-align:left">'+esc(intro.texto)+'</p>' : '')
+      + '<button type="button" class="pd-btn" id="pd-comecar">'+esc(intro.botao || 'Responder')+'</button></div>'
+    );
+    q('pd-comecar').addEventListener('click', function(){ atual = 0; desenhar(); });
+  }
+
+  function cabe(p){
+    if(!p.condicao || !p.condicao.chave) return true;
+    var dada = respostas[p.condicao.chave];
+    if(dada == null) return false;
+    return (p.condicao.valores || []).indexOf(dada) !== -1;
+  }
+  function recalcular(){ visiveis = perguntas.filter(cabe); }
+
+  function desenhar(){
+    recalcular();
+    if(atual >= visiveis.length){ enviarQuiz(); return; }
+
+    var p = visiveis[atual];
+    var pct = (atual / visiveis.length) * 100;
+
+    var corpo;
+    if(p.tipo === 'texto'){
+      corpo = '<textarea id="pd-texto" placeholder="Escreva aqui...">'+esc(respostas[p.chave]||'')+'</textarea>'
+            + '<button type="button" class="pd-btn" id="pd-avancar">Avançar</button>';
+    } else {
+      corpo = '<div class="pd-opcoes">'
+        + (p.opcoes||[]).map(function(o){
+            var sel = respostas[p.chave] === o.valor ? ' sel' : '';
+            return '<button type="button" class="pd-opcao'+sel+'" data-valor="'+esc(o.valor)+'">'
+                 + '<span class="pd-marca"></span><span>'+esc(o.label)+'</span></button>';
+          }).join('')
+        + '</div>';
+    }
+
+    pinta(
+      '<div class="pd-barra"><i style="width:'+pct+'%"></i></div>'
+      + '<div class="pd-passo">Pergunta '+(atual+1)+' de '+visiveis.length+'</div>'
+      + '<p class="pd-pergunta">'+esc(p.enunciado)+'</p>'
+      + (p.ajuda ? '<div class="pd-ajuda">'+esc(p.ajuda)+'</div>' : '')
+      + corpo
+      + '<div class="pd-erro" id="pd-erro">Responda para continuar</div>'
+      + (atual > 0 ? '<button type="button" class="pd-voltar" id="pd-voltar">← Voltar</button>' : '')
+    );
+
+    if(p.tipo === 'texto'){
+      q('pd-avancar').addEventListener('click', function(){
+        var v = (q('pd-texto').value || '').trim();
+        if(p.obrigatoria && !v){ q('pd-erro').classList.add('on'); return; }
+        respostas[p.chave] = v; atual++; desenhar();
+      });
+    } else {
+      Array.prototype.forEach.call(alvo.querySelectorAll('.pd-opcao'), function(b){
+        b.addEventListener('click', function(){
+          respostas[p.chave] = b.dataset.valor;
+          b.classList.add('sel');
+          recalcular();
+          setTimeout(function(){ atual++; desenhar(); }, 240);
+        });
+      });
+    }
+
+    var voltar = q('pd-voltar');
+    if(voltar) voltar.addEventListener('click', function(){ if(atual>0){ atual--; desenhar(); } });
+  }
+
+  async function enviarQuiz(){
+    pinta('<div class="pd-fim"><p>Salvando suas respostas…</p></div>');
+    try{
+      var r = await fetch(API + '/quiz', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ inscricao_id: inscricaoId, lancamento: LANC, respostas: respostas })
+      });
+      var d = await r.json();
+      grupoUrl = d.grupo_url || null;
+    }catch(e){}
+    finalizar();
+  }
+
+  function finalizar(){
+    if(!grupoUrl){
+      grupoUrl = API + '/r/grupo/publico?l=' + encodeURIComponent(LANC)
+               + (inscricaoId ? '&i=' + inscricaoId : '');
+    }
+    pinta(
+      '<div class="pd-barra"><i style="width:100%"></i></div>'
+      + '<div class="pd-fim"><div class="pd-emoji">✅</div>'
+      + '<h3>Inscrição confirmada!</h3>'
+      + '<p>Entre no grupo do WhatsApp para receber o link da aula e os avisos.</p>'
+      + '<a class="pd-btn" style="display:block;text-decoration:none" href="'+esc(grupoUrl)+'">💬 Entrar no grupo</a></div>'
+    );
+    setTimeout(function(){ try{ window.location.href = grupoUrl; }catch(e){} }, 900);
+  }
+
+  telaForm();
+})();`;
+}
+
 // =====================================================================
 // META ADS
 // Busca campanhas/conjuntos/anúncios e as métricas diárias e grava no
@@ -713,7 +1026,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v12-quiz',
+            versao: 'v13-embed',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -843,6 +1156,36 @@ export default {
         return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou }, 200, ch);
       }
 
+      // ============ WIDGET DA LP ============
+      if (partes[0] === 'embed.js') {
+        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
+        return new Response(widgetJS(slug, url.origin), {
+          headers: {
+            'Content-Type': 'application/javascript; charset=utf-8',
+            // curto: o cliente não precisa limpar cache ao mexer no quiz
+            'Cache-Control': 'public, max-age=300',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+
+      // link do grupo sem expor o segredo do webhook na landing
+      if (partes[0] === 'r' && partes[1] === 'grupo' && partes[2] === 'publico') {
+        const inscricaoId = url.searchParams.get('i');
+        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO;
+        const lanc = await db.select('lancamentos',
+          { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' });
+        const destino = lanc?.[0]?.config?.grupo_url;
+        if (!destino) return new Response('Grupo indisponível no momento.', { status: 404 });
+        if (inscricaoId) {
+          ctx.waitUntil(db.rpc('ingest_evento', {
+            p: { inscricao_id: inscricaoId, tipo: 'grupo_click', fonte: 'interno',
+                 lancamento: lanc[0].slug, payload: {} },
+          }).catch(() => {}));
+        }
+        return Response.redirect(destino, 302);
+      }
+
       // ============ QUIZ (público — o lead responde) ============
       if (partes[0] === 'quiz' && req.method === 'GET') {
         const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
@@ -871,7 +1214,7 @@ export default {
 
         // devolve o link do grupo já rastreado
         const slug = s(corpo?.lancamento) || env.LANCAMENTO_PADRAO || '';
-        const link = `${url.origin}/r/grupo/${env.WEBHOOK_SECRET}`
+        const link = `${url.origin}/r/grupo/publico`
                    + `?l=${encodeURIComponent(slug)}&i=${r.inscricao_id}`;
         return jsonResponse({ ...r, grupo_url: link }, 200, ch);
       }
