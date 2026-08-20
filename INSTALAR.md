@@ -37,6 +37,8 @@ Pode rodar de novo sem medo: todos são feitos para repetir sem quebrar nada.
 | 25 | `25_conserta_home.sql` | conserta a Home |
 | 26 | `26_ajustes.sql` | tela de ajustes |
 | 27 | `27_custos.sql` | impostos e custos configuráveis |
+| 28 | `28_manychat_n8n.sql` | ManyChat via n8n |
+| 29 | `29_webhook_lancamento.sql` | webhook por lançamento (SendFlow) |
 
 Não existe arquivo 19 — foi substituído pelo 20.
 
@@ -91,7 +93,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v27-custos"
+"versao": "v30-webhook-lancamento"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.
@@ -155,6 +157,7 @@ ManyChat.
 1. Criar o lançamento (gera o código, ex: `L2610`)
 2. Ajustes → metas, link do grupo novo, contas do Meta
 3. Quiz → copiar do anterior e revisar
+4. Integrações → SendFlow: criar conexão nova com a URL do lançamento
 4. Copiar as duas linhas e trocar o formulário na LP
 5. Colocar o código no início do nome das campanhas, nas duas contas
 6. Cadastrar as aulas

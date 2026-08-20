@@ -493,6 +493,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
   if (dados.utm?.content)  corpo.set('utm_content', dados.utm.content);
   if (dados.meta?.ad_id)   corpo.set('adid', dados.meta.ad_id);
   if (dados.landing_url)   corpo.set('url', dados.landing_url);
+  if (dados.lancamento)    corpo.set('lancamento', dados.lancamento);
 
   // --- SellFlux (dispara a sequência de e-mail)
   if (urlSellflux) {
@@ -514,23 +515,31 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
     }
   }
 
-  // --- ManyChat (webhook já montado do lado do cliente)
+  // --- n8n -> ManyChat
+  // O destino é um fluxo do n8n que cria ou atualiza o contato no
+  // ManyChat, aplica a tag e entra no fluxo. O n8n aceita os dois
+  // formatos; o que importa é o nome dos campos bater com o que o
+  // workflow lê. Por isso o formato é escolhido na tela.
   if (urlManychat) {
     try {
-      const r = await fetch(urlManychat, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nome: dados.nome, email: dados.email, telefone: dados.telefone,
-          lancamento: dados.lancamento,
-          utm_campaign: dados.utm?.campaign, adid: dados.meta?.ad_id,
-        }),
-      });
-      if (!r.ok) throw new Error(`manychat ${r.status}`);
+      const comoJson = (cfgManychat?.config?.formato || 'json') === 'json';
+
+      const r = await fetch(urlManychat, comoJson
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.fromEntries(corpo)),
+          }
+        : {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: corpo,
+          });
+      if (!r.ok) throw new Error(`n8n ${r.status}`);
     } catch (e: any) {
       await db.insert('webhooks_raw', {
         fonte: 'saida_manychat_falhou',
-        body: { dados, pessoa_id: pessoaId },
+        body: { enviado: Object.fromEntries(corpo), pessoa_id: pessoaId },
         processado: false,
         erro: String(e?.message || e).slice(0, 400),
       }).catch(() => {});
@@ -541,10 +550,19 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
 // =====================================================================
 // PROCESSAMENTO DE WEBHOOK DE ENTRADA
 // =====================================================================
-async function processar(fonte: string, body: any, rawId: number | null, db: Supabase, env: Env) {
+/**
+ * `lancamento` vem da URL do webhook (?l=slug). Isso permite ter uma
+ * conexão por lançamento na mesma plataforma — no SendFlow, por exemplo,
+ * cada campanha de grupo aponta para a URL do seu lançamento. Sem isso,
+ * tudo cairia no lançamento padrão do Worker.
+ */
+async function processar(
+  fonte: string, body: any, rawId: number | null,
+  db: Supabase, env: Env, lancamento?: string,
+) {
   try {
     let resultado: any;
-    const lp = env.LANCAMENTO_PADRAO;
+    const lp = lancamento || env.LANCAMENTO_PADRAO;
     switch (fonte) {
       case 'sellflux':
       case 'teste':
@@ -1398,7 +1416,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v27-custos',
+            versao: 'v30-webhook-lancamento',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1496,10 +1514,18 @@ export default {
           }
         }
 
+        const lancDaUrl = url.searchParams.get('l')
+          || url.searchParams.get('lancamento');
+        if (lancDaUrl) headers['x-dash-lancamento'] = lancDaUrl;
+
         const raw = await db.insert('webhooks_raw', { fonte, headers, body, processado: false }, 'dash');
         const rawId = raw?.[0]?.id ?? null;
 
-        ctx.waitUntil(processar(fonte, body, rawId, db, env));
+        // ?l=slug amarra este webhook a um lançamento específico
+        const lancWebhook = url.searchParams.get('l')
+          || url.searchParams.get('lancamento')
+          || undefined;
+        ctx.waitUntil(processar(fonte, body, rawId, db, env, lancWebhook));
         return jsonResponse({ ok: true, recebido: true, raw_id: rawId }, 200, ch);
       }
 
