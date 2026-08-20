@@ -1,0 +1,22 @@
+{
+  "name": "dash",
+  "main": "index.ts",
+  "compatibility_date": "2026-06-01",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "LANCAMENTO_PADRAO": "lanc-2026-09"
+  }
+  // SECRETS (Settings > Variables and Secrets, tipo Secret)
+  //   SUPABASE_URL          https://xxxx.supabase.co
+  //   SUPABASE_SERVICE_KEY  service_role  (nunca no front)
+  //   SUPABASE_ANON_KEY     anon / public
+  //   WEBHOOK_SECRET        segredo que vai na URL dos webhooks
+  //   DEBUG_TOKEN           segredo das rotas /debug
+  //   SELLFLUX_ENDPOINT     opcional - URL de POST do SellFlux
+  //   MANYCHAT_WEBHOOK      opcional - webhook que repassa ao ManyChat
+  //
+  // VARIAVEL (tipo Text)
+  //   ORIGENS_PERMITIDAS    https://sua-dash.pages.dev
+}
