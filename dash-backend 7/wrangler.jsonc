@@ -1,0 +1,25 @@
+{
+  "name": "dash",
+  "main": "index.ts",
+  "compatibility_date": "2026-06-01",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "LANCAMENTO_PADRAO": "lanc-2026-09",
+    "META_API_VERSAO": "v25.0"
+  },
+  "triggers": {
+    "crons": ["17 * * * *"]
+  }
+  // SECRETS (Settings > Variables and Secrets, tipo Secret)
+  //   SUPABASE_URL          https://xxxx.supabase.co
+  //   SUPABASE_SERVICE_KEY  service_role  (nunca no front)
+  //   SUPABASE_ANON_KEY     anon / public
+  //   WEBHOOK_SECRET        segredo que vai na URL dos webhooks
+  //   DEBUG_TOKEN           segredo das rotas /debug e /sync
+  //   META_TOKEN            token de usuario do sistema do Business Manager
+  //
+  // Opcionais (da para configurar pela tela de Integracoes):
+  //   HOTMART_HOTTOK  SELLFLUX_ENDPOINT  MANYCHAT_WEBHOOK  TMB_TOKEN
+}
