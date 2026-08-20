@@ -2,7 +2,7 @@
  * DASH DE LANÇAMENTO — API
  * Worker separado do de ingestão. Arquivo único, na raiz do repositório.
  *
- * Autenticação: o login passa por aqui. O front manda e-mail e senha,
+ * Autenticação: o login passa por aqui. O front manda e-mail e senha, 
  * este Worker conversa com o Supabase Auth e devolve o token. Nenhuma
  * chave do Supabase existe no navegador — nem a anon.
  *
