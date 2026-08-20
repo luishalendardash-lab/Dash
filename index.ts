@@ -683,7 +683,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v8-codigo-lancamento',
+            versao: 'v9-codigo-editavel',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -875,6 +875,19 @@ export default {
         const slug = url.searchParams.get('lancamento') || '';
 
         // -------- lançamentos
+        if (partes[1] === 'sugerir-codigo') {
+          const r = await db.rpc('sugerir_codigo', {
+            p: { captacao_inicio: url.searchParams.get('inicio') || null },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'alterar-codigo' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('alterar_codigo', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
         if (partes[1] === 'lancamentos' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
           const r = await db.rpc('criar_lancamento', { p: corpo });
