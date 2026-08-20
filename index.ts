@@ -511,7 +511,7 @@ async function sincronizarConta(
     level: 'ad',
     time_increment: '1',
     time_range: JSON.stringify({ since: fmt(de), until: fmt(ate) }),
-    fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,spend,ctr,cpm,cpc,actions,video_play_actions',
+    fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,inline_link_click_ctr,spend,ctr,cpm,cpc,actions,cost_per_action_type,video_play_actions',
   }, env);
 
   const idsAnuncio = new Set(anuncios.map((a: any) => a.id));
@@ -520,10 +520,28 @@ async function sincronizarConta(
     .map((i: any) => {
       // "lead" do Meta é referência; o número que vale é o do nosso banco
       const acoes = Array.isArray(i.actions) ? i.actions : [];
-      const lead = acoes.find((a: any) => a.action_type === 'lead'
-        || a.action_type === 'offsite_conversion.fb_pixel_lead');
+      const valorDe = (tipo: string) => {
+        const a = acoes.find((x: any) => x.action_type === tipo);
+        return a ? Number(a.value || 0) : 0;
+      };
+
+      const lead = valorDe('lead') || valorDe('offsite_conversion.fb_pixel_lead');
+      const visitas = valorDe('landing_page_view');
+
+      // "Resultado" no Gerenciador depende do objetivo da campanha.
+      // Ordem de preferência: conversão de lead > visita na página > clique no link.
+      let resultados = 0;
+      let resultadoTipo = 'clique no link';
+      if (lead > 0) { resultados = lead; resultadoTipo = 'lead'; }
+      else if (visitas > 0) { resultados = visitas; resultadoTipo = 'visita na pagina'; }
+      else { resultados = Number(i.inline_link_clicks || 0); }
+
       const video = Array.isArray(i.video_play_actions) ? i.video_play_actions[0] : null;
       return {
+        visitas_pagina: visitas,
+        resultados,
+        resultado_tipo: resultadoTipo,
+        ctr_link: i.inline_link_click_ctr ? Number(i.inline_link_click_ctr) : null,
         data_ref: i.date_start,
         ad_id: i.ad_id,
         impressoes: Number(i.impressions || 0),
@@ -534,7 +552,7 @@ async function sincronizarConta(
         ctr: i.ctr ? Number(i.ctr) : null,
         cpm: i.cpm ? Number(i.cpm) : null,
         cpc: i.cpc ? Number(i.cpc) : null,
-        leads_meta: lead ? Number(lead.value || 0) : 0,
+        leads_meta: lead,
         video_3s: video ? Number(video.value || 0) : 0,
         raw: {},
       };
@@ -590,11 +608,23 @@ async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: En
     }
   }
 
+  // remove o que não descende de campanha com o código do lançamento.
+  // Sem isso, dado de sincronização antiga (ou campanha renomeada para
+  // fora do lançamento) fica no banco e infla o investido para sempre.
+  let purga: any = null;
+  if (codigo) {
+    purga = await db.rpc('purgar_ads', { p: { lancamento: slug } }).catch(() => null);
+  }
+
   const total = await db.rpc('ingest_ads_insights', { p: { lancamento: slug, insights: [] } });
 
   return {
     ok: erros.length < contas.length,   // falha só se TODAS as contas falharem
     codigo: codigo || '(sem codigo — rode o 08_codigo_lancamento.sql)',
+    limpeza: purga ? {
+      entidades_removidas: purga.entidades_removidas,
+      insights_removidos: purga.insights_removidos,
+    } : undefined,
     contas: resultados,
     erros: erros.length ? erros : undefined,
     gasto_total: total?.gasto_total ?? 0,
@@ -683,7 +713,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v9-codigo-editavel',
+            versao: 'v11-anuncios',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
