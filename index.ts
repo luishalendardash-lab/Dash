@@ -1416,7 +1416,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v33-tags-padrao',
+            versao: 'v34-planilhas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1885,6 +1885,10 @@ export default {
             const r = await db.rpc('importar_vendas', { p: corpo });
             return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
           }
+          if (alvo === 'importar-captura') {
+            const r = await db.rpc('importar_captura', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
           if (alvo === 'importar-tags') {
             const r = await db.rpc('importar_tags_padrao', { p: corpo });
             return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
@@ -1950,6 +1954,11 @@ export default {
         }
 
         // -------- ficha do lead
+        if (partes[1] === 'lead-respostas' && partes[2]) {
+          const r = await db.rpc('respostas_do_lead', { p: { inscricao_id: partes[2] } });
+          return jsonResponse(r, 200, ch);
+        }
+
         if (partes[1] === 'lead' && partes[2]) {
           const id = partes[2];
           const ficha = await db.select('inscricoes', {
