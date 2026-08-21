@@ -1525,7 +1525,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v37-resumo-lancamento',
+            versao: 'v38-telas-separadas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1956,8 +1956,35 @@ export default {
         }
 
         if (partes[1] === 'resumo-lancamento') {
-          const r = await db.rpc('dash_resumo_lancamento', { p: { lancamento: slug } });
+          const de = url.searchParams.get('de') || '';
+          const ate = url.searchParams.get('ate') || '';
+          const prods = (url.searchParams.get('produtos') || '')
+            .split('|').filter(Boolean);
+          const r = await db.rpc('dash_resumo_lancamento', {
+            p: { lancamento: slug, de, ate, produtos: prods },
+          });
           return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'faturamento') {
+          const prods = (url.searchParams.get('produtos') || '')
+            .split('|').filter(Boolean);
+          const r = await db.rpc('dash_faturamento', {
+            p: {
+              de: url.searchParams.get('de') || '',
+              ate: url.searchParams.get('ate') || '',
+              produtos: prods,
+            },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'escopo-lancamento' && req.method === 'POST') {
+          const corpo = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_escopo_lancamento', {
+            p: { ...(corpo as any), lancamento: slug },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'recorrencia') {
