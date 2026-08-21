@@ -47,6 +47,7 @@ Pode rodar de novo sem medo: todos são feitos para repetir sem quebrar nada.
 | 35 | `35_completar_utm.sql` | completar UTM de leads já importados |
 | 36 | `36_planilhas_captura.sql` | planilhas de captura com anúncio e quiz |
 | 37 | `37_desempenho_criativo.sql` | CPL, CPL engenheiro e CPA por criativo |
+| 38 | `38_ads_historico.sql` | investimento de lançamentos antigos pelo ID |
 
 Não existe arquivo 19 — foi substituído pelo 20.
 
@@ -101,7 +102,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v35-criativos"
+"versao": "v37-resumo-lancamento"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.

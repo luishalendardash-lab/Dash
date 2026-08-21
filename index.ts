@@ -1335,6 +1335,115 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
 }
 
 // =====================================================================
+// GASTO DOS LANÇAMENTOS ANTIGOS
+//
+// A sincronização normal filtra campanhas pelo código no nome. Nos
+// lançamentos antigos esse código não existe, mas a planilha de captura
+// trouxe o ID de cada anúncio — e por ID a API responde sem depender de
+// nome nenhum.
+// =====================================================================
+async function sincronizarHistorico(slug: string, db: Supabase, env: Env): Promise<any> {
+  if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const plano = await db.rpc('ads_para_buscar', { p: { lancamento: slug } });
+  if (plano?.ok === false) return plano;
+
+  const ids: string[] = plano?.ad_ids || [];
+  const contas: string[] = plano?.contas || [];
+  if (!ids.length) return { ok: true, aviso: 'nenhum anuncio sem gasto', anuncios: 0 };
+  if (!contas.length) {
+    return { ok: false, erro: 'nenhuma conta de anuncio configurada em Ajustes' };
+  }
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const periodo = JSON.stringify({ since: plano.de, until: plano.ate });
+
+  const itens: any[] = [];
+  const erros: string[] = [];
+
+  for (const conta of contas) {
+    // a API aceita filtrar por lista de ids; 50 por vez evita URL gigante
+    for (let i = 0; i < ids.length; i += 50) {
+      const lote = ids.slice(i, i + 50);
+      const qs = new URLSearchParams({
+        level: 'ad',
+        time_range: periodo,
+        time_increment: '1',
+        fields: 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,'
+              + 'spend,impressions,clicks,inline_link_clicks,date_start',
+        filtering: JSON.stringify([{ field: 'ad.id', operator: 'IN', value: lote }]),
+        limit: '500',
+        access_token: env.META_TOKEN,
+      });
+
+      let url: string | null =
+        `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
+      let paginas = 0;
+
+      while (url && paginas < 20) {
+        const r = await fetch(url);
+        const d: any = await r.json().catch(() => ({}));
+
+        if (d.error) {
+          erros.push(`${conta}: ${d.error.message}`);
+          break;
+        }
+
+        for (const linha of d.data || []) {
+          itens.push({
+            ad_id: linha.ad_id,
+            nome: linha.ad_name,
+            conjunto_id: linha.adset_id,
+            conjunto: linha.adset_name,
+            campanha_id: linha.campaign_id,
+            campanha: linha.campaign_name,
+            conta,
+            dia: linha.date_start,
+            gasto: linha.spend,
+            impressoes: linha.impressions,
+            cliques: linha.clicks,
+            cliques_link: linha.inline_link_clicks,
+          });
+        }
+
+        url = d.paging?.next || null;
+        paginas++;
+      }
+    }
+  }
+
+  if (!itens.length) {
+    return {
+      ok: false,
+      erro: erros.length ? erros[0]
+        : 'o Meta nao devolveu gasto para esses anuncios no periodo',
+      anuncios_procurados: ids.length,
+    };
+  }
+
+  // grava em lotes: um payload muito grande estoura o limite do Postgres
+  let entidades = 0, insights = 0, gasto = 0;
+  for (let i = 0; i < itens.length; i += 300) {
+    const r = await db.rpc('ingest_ads_historico', {
+      p: { lancamento: slug, itens: itens.slice(i, i + 300) },
+    });
+    entidades += r?.entidades || 0;
+    insights += r?.insights || 0;
+    gasto += Number(r?.gasto || 0);
+  }
+
+  return {
+    ok: true,
+    anuncios_procurados: ids.length,
+    linhas: itens.length,
+    entidades, insights,
+    gasto: Number(gasto.toFixed(2)),
+    periodo: { de: plano.de, ate: plano.ate },
+    avisos: erros.length ? erros : undefined,
+  };
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -1416,7 +1525,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v35-criativos',
+            versao: 'v37-resumo-lancamento',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1785,6 +1894,16 @@ export default {
         }
 
         // -------- lista de leads
+        if (partes[1] === 'sincronizar' && partes[2] === 'historico') {
+          const r = await sincronizarHistorico(slug, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'ads-sem-gasto') {
+          const r = await db.rpc('ads_sem_gasto', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
         if (partes[1] === 'sincronizar' && partes[2]) {
           const alvo = partes[2];
           if (alvo === 'tmb') {
@@ -1834,6 +1953,11 @@ export default {
         if (partes[1] === 'vendas') {
           const r = await db.rpc('dash_vendas', { p: { lancamento: slug, produtos } });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'resumo-lancamento') {
+          const r = await db.rpc('dash_resumo_lancamento', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'recorrencia') {
