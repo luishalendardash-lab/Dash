@@ -39,6 +39,9 @@ Pode rodar de novo sem medo: todos são feitos para repetir sem quebrar nada.
 | 27 | `27_custos.sql` | impostos e custos configuráveis |
 | 28 | `28_manychat_n8n.sql` | ManyChat via n8n |
 | 29 | `29_webhook_lancamento.sql` | webhook por lançamento (SendFlow) |
+| 30 | `30_importar.sql` | importar histórico e os 6 lançamentos FPEE |
+| 31 | `31_data_webhook.sql` | aceita data brasileira nos webhooks |
+| 32 | `32_tags_recorrencia.sql` | importar por tags e análise de recorrência |
 
 Não existe arquivo 19 — foi substituído pelo 20.
 
@@ -93,7 +96,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v30-webhook-lancamento"
+"versao": "v32-recorrencia"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.

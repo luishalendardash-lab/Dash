@@ -1416,7 +1416,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v30-webhook-lancamento',
+            versao: 'v32-recorrencia',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1836,6 +1836,16 @@ export default {
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
+        if (partes[1] === 'recorrencia') {
+          const r = await db.rpc('dash_recorrencia', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'importacao' && req.method === 'GET') {
+          const r = await db.rpc('resumo_importacao', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
         if (partes[1] === 'ajustes' && req.method === 'GET') {
           const r = await db.rpc('dash_ajustes', { p: { lancamento: slug } });
           return jsonResponse(r, 200, ch);
@@ -1865,6 +1875,26 @@ export default {
             const r = await db.rpc('salvar_lancamento', {
               p: { ...corpo, lancamento: corpo.lancamento || slug },
             });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'importar-leads') {
+            const r = await db.rpc('importar_leads', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'importar-vendas') {
+            const r = await db.rpc('importar_vendas', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'importar-tags') {
+            const r = await db.rpc('importar_por_tags', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'tags-do-lote') {
+            const r = await db.rpc('tags_do_lote', { p: corpo });
+            return jsonResponse(r, 200, ch);
+          }
+          if (alvo === 'desfazer-importacao') {
+            const r = await db.rpc('desfazer_importacao', { p: corpo });
             return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
           }
           if (alvo === 'zerar') {
