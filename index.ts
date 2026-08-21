@@ -1416,7 +1416,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v34-planilhas',
+            versao: 'v35-criativos',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1883,6 +1883,10 @@ export default {
           }
           if (alvo === 'importar-vendas') {
             const r = await db.rpc('importar_vendas', { p: corpo });
+            return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+          }
+          if (alvo === 'gasto-manual') {
+            const r = await db.rpc('lancar_gasto_manual', { p: corpo });
             return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
           }
           if (alvo === 'importar-captura') {
