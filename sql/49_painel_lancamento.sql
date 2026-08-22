@@ -78,25 +78,10 @@ begin
   from dash.inscricoes where lancamento_id = v_lanc;
 
   -- ---- vendas na janela e nos produtos escolhidos
-  create temporary table if not exists tmp_v (
-    venda_id uuid, inscricao_id uuid, engenheiro boolean,
-    plataforma text, produto text, bruto numeric, liquido numeric,
-    status text, dia date
-  ) on commit drop;
-  delete from tmp_v;
-
-  insert into tmp_v
-  select v.id, v.inscricao_id, coalesce(i.engenheiro, false),
-         coalesce(v.plataforma, 'outra'),
-         coalesce(v.produto, '(sem produto)'),
-         v.valor_bruto,
-         case when v.valor_liquido > 0 then v.valor_liquido else v.valor_bruto * 0.9 end,
-         v.status, v.ocorreu_em::date
-  from dash.vendas v
-  left join dash.inscricoes i on i.id = v.inscricao_id
-  where v.ocorreu_em between v_de and v_ate
-    and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos));
-
+  -- Uma view temporária por chamada seria mais legível, mas tabela
+  -- temporária dentro de função quebra no pool de conexões do PostgREST:
+  -- a sessão é reaproveitada e a tabela sobrevive entre chamadas. Por
+  -- isso a condição se repete em cada consulta abaixo.
   select
     count(*) filter (where status = 'aprovada'),
     round(coalesce(sum(bruto) filter (where status = 'aprovada'), 0), 2),
@@ -109,13 +94,27 @@ begin
     round(coalesce(sum(bruto) filter (where status = 'aprovada' and engenheiro), 0), 2)
   into v_vendas, v_receita, v_liquido, v_ticket, v_reemb, v_valor_reemb,
        v_com_lead, v_sem_lead, v_receita_eng
-  from tmp_v;
+  from (
+    select v.id, v.inscricao_id, coalesce(i.engenheiro, false) as engenheiro,
+           v.valor_bruto as bruto,
+           case when v.valor_liquido > 0 then v.valor_liquido
+                else v.valor_bruto * 0.9 end as liquido,
+           v.status
+    from dash.vendas v
+    left join dash.inscricoes i on i.id = v.inscricao_id
+    where v.ocorreu_em between v_de and v_ate
+      and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos))
+  ) tv;
 
   -- compradores distintos, e quantos deles eram engenheiros
-  select count(distinct inscricao_id),
-         count(distinct inscricao_id) filter (where engenheiro)
+  select count(distinct v.inscricao_id),
+         count(distinct v.inscricao_id) filter (where coalesce(i.engenheiro, false))
   into v_compradores, v_comp_eng
-  from tmp_v where status = 'aprovada' and inscricao_id is not null;
+  from dash.vendas v
+  left join dash.inscricoes i on i.id = v.inscricao_id
+  where v.ocorreu_em between v_de and v_ate
+    and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos))
+    and v.status = 'aprovada' and v.inscricao_id is not null;
 
   -- ---- descontos configurados (imposto, coprodução, comissão)
   select coalesce(sum(
@@ -140,7 +139,15 @@ begin
            round(avg(bruto), 2) as ticket,
            case when v_receita > 0
                 then round(100.0 * sum(bruto) / v_receita, 1) end as pct
-    from tmp_v where status = 'aprovada'
+    from (
+      select coalesce(v.plataforma, 'outra') as plataforma, v.valor_bruto as bruto,
+             case when v.valor_liquido > 0 then v.valor_liquido
+                  else v.valor_bruto * 0.9 end as liquido
+      from dash.vendas v
+      where v.ocorreu_em between v_de and v_ate
+        and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos))
+        and v.status = 'aprovada'
+    ) tv
     group by plataforma
   ) t;
 
@@ -158,7 +165,14 @@ begin
            count(distinct inscricao_id) as compradores,
            case when v_receita > 0
                 then round(100.0 * sum(bruto) / v_receita, 1) end as pct
-    from tmp_v where status = 'aprovada'
+    from (
+      select coalesce(v.produto, '(sem produto)') as produto, v.valor_bruto as bruto,
+             v.inscricao_id
+      from dash.vendas v
+      where v.ocorreu_em between v_de and v_ate
+        and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos))
+        and v.status = 'aprovada'
+    ) tv
     group by produto
   ) t;
 
@@ -183,7 +197,14 @@ begin
   into v_dias
   from (
     select dia, count(*) as n, round(sum(bruto), 2) as receita
-    from tmp_v where status = 'aprovada' group by dia
+    from (
+      select v.ocorreu_em::date as dia, v.valor_bruto as bruto
+      from dash.vendas v
+      where v.ocorreu_em between v_de and v_ate
+        and (v_produtos is null or dash.chave_produto(v.produto) = any(v_produtos))
+        and v.status = 'aprovada'
+    ) tv
+    group by dia
   ) t;
 
   return jsonb_build_object(
