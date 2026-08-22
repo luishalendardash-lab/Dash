@@ -1444,6 +1444,156 @@ async function sincronizarHistorico(slug: string, db: Supabase, env: Env): Promi
 }
 
 // =====================================================================
+// CAMPANHAS QUE GASTARAM NO PERÍODO DO LANÇAMENTO
+//
+// Busca tudo que rodou na janela, sem filtrar por nome. A escolha de
+// quais pertencem ao lançamento fica com o usuário — no mesmo período
+// costuma haver remarketing e outros funis.
+// =====================================================================
+async function buscarCampanhasPeriodo(slug: string, db: Supabase, env: Env): Promise<any> {
+  if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const plano = await db.rpc('campanhas_escolhidas', { p: { lancamento: slug } });
+  if (plano?.ok === false) return plano;
+
+  const contas: string[] = plano?.contas || [];
+  if (!contas.length) {
+    return { ok: false, erro: 'nenhuma conta de anuncio configurada em Ajustes' };
+  }
+  if (!plano?.de) {
+    return { ok: false, erro: 'este lancamento nao tem leads com data' };
+  }
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const periodo = JSON.stringify({ since: plano.de, until: plano.ate });
+  const campanhas: any[] = [];
+  const erros: string[] = [];
+
+  for (const conta of contas) {
+    const qs = new URLSearchParams({
+      level: 'campaign',
+      time_range: periodo,
+      fields: 'campaign_id,campaign_name,spend,impressions,date_start,date_stop',
+      limit: '200',
+      access_token: env.META_TOKEN,
+    });
+
+    let url: string | null =
+      `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
+    let paginas = 0;
+
+    while (url && paginas < 10) {
+      const r = await fetch(url);
+      const d: any = await r.json().catch(() => ({}));
+      if (d.error) { erros.push(`${conta}: ${d.error.message}`); break; }
+
+      for (const linha of d.data || []) {
+        campanhas.push({
+          id: linha.campaign_id,
+          nome: linha.campaign_name,
+          conta,
+          gasto: linha.spend,
+          impressoes: linha.impressions,
+          de: linha.date_start,
+          ate: linha.date_stop,
+        });
+      }
+      url = d.paging?.next || null;
+      paginas++;
+    }
+  }
+
+  if (!campanhas.length) {
+    return {
+      ok: false,
+      erro: erros.length ? erros[0] : 'nenhuma campanha gastou nesse periodo',
+      periodo: { de: plano.de, ate: plano.ate },
+    };
+  }
+
+  const r = await db.rpc('ingest_candidatas', { p: { lancamento: slug, campanhas } });
+  return { ...r, periodo: { de: plano.de, ate: plano.ate },
+           avisos: erros.length ? erros : undefined };
+}
+
+// Depois da escolha: puxa os anúncios das campanhas marcadas.
+async function importarCampanhasEscolhidas(
+  slug: string, db: Supabase, env: Env,
+): Promise<any> {
+  if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const plano = await db.rpc('campanhas_escolhidas', { p: { lancamento: slug } });
+  const ids: string[] = plano?.ids || [];
+  if (!ids.length) return { ok: false, erro: 'nenhuma campanha marcada' };
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const periodo = JSON.stringify({ since: plano.de, until: plano.ate });
+  const itens: any[] = [];
+  const erros: string[] = [];
+
+  for (const conta of (plano?.contas || [])) {
+    for (let i = 0; i < ids.length; i += 25) {
+      const lote = ids.slice(i, i + 25);
+      const qs = new URLSearchParams({
+        level: 'ad',
+        time_range: periodo,
+        time_increment: '1',
+        fields: 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,'
+              + 'spend,impressions,clicks,inline_link_clicks,date_start',
+        filtering: JSON.stringify([
+          { field: 'campaign.id', operator: 'IN', value: lote },
+        ]),
+        limit: '500',
+        access_token: env.META_TOKEN,
+      });
+
+      let url: string | null =
+        `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
+      let paginas = 0;
+
+      while (url && paginas < 30) {
+        const r = await fetch(url);
+        const d: any = await r.json().catch(() => ({}));
+        if (d.error) { erros.push(`${conta}: ${d.error.message}`); break; }
+
+        for (const l of d.data || []) {
+          itens.push({
+            ad_id: l.ad_id, nome: l.ad_name,
+            conjunto_id: l.adset_id, conjunto: l.adset_name,
+            campanha_id: l.campaign_id, campanha: l.campaign_name,
+            conta, dia: l.date_start, gasto: l.spend,
+            impressoes: l.impressions, cliques: l.clicks,
+            cliques_link: l.inline_link_clicks,
+          });
+        }
+        url = d.paging?.next || null;
+        paginas++;
+      }
+    }
+  }
+
+  if (!itens.length) {
+    return { ok: false, erro: erros.length ? erros[0] : 'nenhum anuncio com gasto' };
+  }
+
+  let entidades = 0, insights = 0, gasto = 0;
+  for (let i = 0; i < itens.length; i += 300) {
+    const r = await db.rpc('ingest_ads_historico', {
+      p: { lancamento: slug, itens: itens.slice(i, i + 300) },
+    });
+    entidades += r?.entidades || 0;
+    insights += r?.insights || 0;
+    gasto += Number(r?.gasto || 0);
+  }
+
+  return {
+    ok: true, campanhas: ids.length, linhas: itens.length,
+    entidades, insights, gasto: Number(gasto.toFixed(2)),
+    periodo: { de: plano.de, ate: plano.ate },
+  };
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -1525,7 +1675,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v40-painel-completo',
+            versao: 'v41-campanhas-periodo',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -1896,6 +2046,29 @@ export default {
         // -------- lista de leads
         if (partes[1] === 'sincronizar' && partes[2] === 'historico') {
           const r = await sincronizarHistorico(slug, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'buscar-campanhas') {
+          const r = await buscarCampanhasPeriodo(slug, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'campanhas-candidatas') {
+          const r = await db.rpc('candidatas_do_lancamento', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'escolher-campanhas' && req.method === 'POST') {
+          const corpo = await req.json().catch(() => ({}));
+          const r = await db.rpc('escolher_campanhas', {
+            p: { lancamento: slug, ids: (corpo as any).ids || [] },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'importar-campanhas') {
+          const r = await importarCampanhasEscolhidas(slug, db, env);
           return jsonResponse(r, r.ok ? 200 : 400, ch);
         }
 
