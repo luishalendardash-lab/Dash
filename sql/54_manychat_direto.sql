@@ -23,7 +23,7 @@ values (
     jsonb_build_object(
       'chave','token','rotulo','Token da API','tipo','senha','obrigatorio',true,
       'dica','1234567:abcdef...',
-      'ajuda','ManyChat > Settings > API > API Key. Cole só o token, sem a palavra Bearer.'),
+      'ajuda','ManyChat > Settings > API > API Key. Cole só o token, sem a palavra Bearer. Deixe vazio para usar o secret MANYCHAT_TOKEN do Worker.'),
     jsonb_build_object(
       'chave','tag','rotulo','Tag ao entrar','tipo','texto','obrigatorio',false,
       'dica','entrada-lead',
@@ -36,7 +36,9 @@ values (
   '{}'::jsonb,
   jsonb_build_array(
     'No ManyChat, vá em Settings > API e copie a API Key.',
-    'Cole no campo Token da API e salve.',
+    'Cole no campo Token da API e salve. Ou, se preferir deixar fixo, '
+      || 'crie um secret MANYCHAT_TOKEN no Worker — a dash usa ele quando o campo '
+      || 'aqui estiver vazio.',
     'Se o seu fluxo de WhatsApp dispara quando o contato é criado, deixe a Tag vazia.',
     'Se ele dispara por tag, escreva o nome exato — a dash aplica logo após criar o contato.',
     'Faça um lead de teste pela landing e confira no ManyChat se o contato apareceu.',

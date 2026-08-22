@@ -34,6 +34,8 @@ interface Env {
   META_API_VERSAO?: string;      // ex: v25.0
   HOTMART_HOTTOK?: string;       // valida que o webhook veio mesmo da Hotmart
   TMB_TOKEN?: string;            // reserva; o normal é configurar pela tela
+  MANYCHAT_TOKEN?: string;
+  MANYCHAT_TAG?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -527,11 +529,21 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
   //            workflow montado e não quer mexer.
   const cfgDireto = await segredoIntegracao('manychat_api', 'token', db);
 
-  if (cfgDireto?.ativa && cfgDireto?.valor) {
+  // O token pode vir da tela ou de um secret do Worker. O secret serve
+  // de reserva: se alguém apagar o campo por engano, o envio continua.
+  const tokenManychat = (cfgDireto?.ativa && cfgDireto?.valor) || env.MANYCHAT_TOKEN;
+  const usarDireto = tokenManychat
+    && (cfgDireto?.ativa !== false || !!env.MANYCHAT_TOKEN);
+
+  if (usarDireto) {
     try {
       const r = await enviarManychat(
         { nome: dados.nome, telefone: dados.telefone, lancamento: dados.lancamento },
-        { token: cfgDireto.valor, ...(cfgDireto.config || {}) },
+        {
+          token: tokenManychat,
+          tag: cfgDireto?.config?.tag || env.MANYCHAT_TAG || '',
+          campo_lancamento: cfgDireto?.config?.campo_lancamento || '',
+        },
       );
       if (!r.ok) throw new Error(r.erro || 'falha no ManyChat');
 
