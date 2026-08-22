@@ -39,6 +39,7 @@ interface Env {
   MANYCHAT_FLOW?: string;
   MANYCHAT_CAMPO?: string;
   MANYCHAT_FIELD_ID?: string;
+  MANYCHAT_CAMPO_FONE?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -562,6 +563,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
           flow_ns: env.MANYCHAT_FLOW || '',
           tag: env.MANYCHAT_TAG || '',
           campo_lancamento: env.MANYCHAT_CAMPO || '',
+          campo_telefone: env.MANYCHAT_CAMPO_FONE || '',
           field_id: env.MANYCHAT_FIELD_ID || '',
         },
       );
@@ -573,6 +575,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
           body: {
             enviado: r.enviado,
             resposta_manychat: r.resposta,
+            passos: r.passos,
             pessoa_id: pessoaId,
             telefone: dados.telefone,
           },
@@ -590,7 +593,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
       if (r.aviso_tag || r.aviso_fluxo) {
         await db.insert('webhooks_raw', {
           fonte: 'manychat_parcial',
-          body: { subscriber_id: r.subscriber_id },
+          body: { subscriber_id: r.subscriber_id, passos: r.passos },
           processado: false,
           erro: [r.aviso_tag && `tag: ${r.aviso_tag}`,
                  r.aviso_fluxo && `fluxo: ${r.aviso_fluxo}`]
@@ -1698,7 +1701,6 @@ async function manychatChamar(
 ): Promise<any> {
   const cabecalho: Record<string, string> = {
     accept: 'application/json',
-    // o token do ManyChat já vem no formato id:hash — o Bearer é nosso
     Authorization: `Bearer ${String(token).replace(/^Bearer\s+/i, '')}`,
   };
 
@@ -1712,18 +1714,62 @@ async function manychatChamar(
     opcoes = { method: metodo, headers: cabecalho, body: JSON.stringify(corpo) };
   }
 
-  const r = await fetch(url, opcoes);
-  const d: any = await r.json().catch(() => ({}));
-  return { status: r.status, ...d };
+  try {
+    const r = await fetch(url, opcoes);
+    const d: any = await r.json().catch(() => ({}));
+    return { http: r.status, ...d };
+  } catch (e: any) {
+    return { http: 0, status: 'error', message: String(e?.message || e) };
+  }
 }
 
-/** Telefone no formato que o ManyChat aceita: +55 e só dígitos. */
+/** O ManyChat quer o número só com dígitos, DDI incluso e sem o '+'. */
 function foneManychat(fone: string): string {
   const d = String(fone || '').replace(/\D/g, '');
   if (!d) return '';
-  return d.startsWith('55') ? `+${d}` : `+55${d}`;
+  return d.startsWith('55') ? d : `55${d}`;
 }
 
+/** Junta o motivo real do erro, que o ManyChat espalha em vários campos. */
+function motivoManychat(r: any): string {
+  const partes: string[] = [];
+  if (r?.message) partes.push(String(r.message));
+
+  const d = r?.details;
+  if (Array.isArray(d?.messages)) {
+    for (const m of d.messages) {
+      partes.push(`${m.field || ''}: ${m.message || ''}`.trim());
+    }
+  } else if (d?.messages && typeof d.messages === 'object') {
+    for (const [campo, msg] of Object.entries(d.messages)) {
+      partes.push(`${campo}: ${JSON.stringify(msg)}`);
+    }
+  } else if (typeof d === 'string') {
+    partes.push(d);
+  }
+
+  return partes.filter(Boolean).join(' | ') || `http ${r?.http ?? '?'}`;
+}
+
+/**
+ * Cria ou encontra o contato no ManyChat e dispara o fluxo.
+ *
+ * Três coisas que a API do ManyChat impõe e não são óbvias:
+ *
+ * 1. Criar contato de WhatsApp por API vem BLOQUEADO por padrão. Retorna
+ *    "Permission denied to import wa_id" — que a API embrulha num
+ *    "Validation error" genérico. Só o suporte libera, por ticket.
+ *
+ * 2. Contato criado pelo canal WhatsApp não é encontrado nem por
+ *    findBySystemField nem por findByCustomField no campo padrão. A
+ *    saída conhecida é manter um campo personalizado espelho com o
+ *    número e buscar por ele — era o que o fluxo do n8n fazia com o
+ *    field_id fixo.
+ *
+ * 3. sendFlow só funciona em contato ativo. Contato recém-criado que
+ *    nunca interagiu está inativo, e a mensagem tem que sair por
+ *    automação com gatilho de tag, não pela API.
+ */
 async function enviarManychat(lead: any, cfg: any): Promise<any> {
   const token = cfg?.token || '';
   if (!token) return { ok: false, erro: 'token do ManyChat nao configurado' };
@@ -1736,158 +1782,144 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
   const primeiro = partes[0] || 'Lead';
   const ultimo = partes.length > 1 ? partes.slice(1).join(' ') : '';
 
-  // 1. tenta criar
-  //
-  // O ManyChat recusa campo vazio com "Validation error" em vez de
-  // ignorá-lo, então last_name só vai quando existe. O consent_phrase é
-  // obrigatório para WhatsApp e precisa ter ao menos algumas letras.
-  const corpoCriar: Record<string, any> = {
-    first_name: primeiro,
-    whatsapp_phone: fone,
-    has_opt_in_sms: true,
-    consent_phrase: 'aceito receber mensagens',
-  };
-  if (ultimo) corpoCriar.last_name = ultimo;
-  if (lead.email) corpoCriar.email = String(lead.email);
-
+  const passos: string[] = [];
   let id = '';
-  const criado = await manychatChamar(
-    '/subscriber/createSubscriber', token, corpoCriar,
-  );
+  let jaExistia = false;
 
-  if (criado?.data?.id) {
-    id = String(criado.data.id);
-  } else {
-    // 2. já existe: procura o contato
-    //
-    // O ManyChat é exigente com o formato do telefone na busca e não
-    // documenta qual aceita. Com '+' devolve vazio, sem '+' encontra —
-    // por isso tentamos as variações em vez de assumir uma.
-    const soDigitos = fone.replace(/\D/g, '');
-
-    // O findBySystemField não encontra contato de WhatsApp — o telefone
-    // dele fica num campo personalizado. Por isso o fluxo antigo do n8n
-    // usava findByCustomField com um field_id fixo: era a única busca
-    // que funcionava. Tentamos as duas, em várias grafias.
-    const tentativas: Array<{ rota: string; params: Record<string, string> }> = [];
-
-    if (cfg?.field_id) {
-      tentativas.push(
-        { rota: '/subscriber/findByCustomField',
-          params: { field_id: String(cfg.field_id), field_value: soDigitos } },
-        { rota: '/subscriber/findByCustomField',
-          params: { field_id: String(cfg.field_id), field_value: fone } },
-      );
-    }
-
-    tentativas.push(
-      { rota: '/subscriber/findBySystemField', params: { phone: soDigitos } },
-      { rota: '/subscriber/findBySystemField', params: { phone: fone } },
+  // ---- 1. procurar antes de criar
+  //
+  // Criar primeiro e tratar o erro funciona, mas gasta uma chamada e
+  // enche o log de "já existe". Procurar antes é mais limpo.
+  if (cfg?.field_id) {
+    const achado = await manychatChamar(
+      '/subscriber/findByCustomField', token,
+      { field_id: String(cfg.field_id), field_value: fone }, 'GET',
     );
+    const lista = achado?.data;
+    if (Array.isArray(lista) && lista[0]?.id) id = String(lista[0].id);
+    else if (lista?.id) id = String(lista.id);
+    passos.push(`busca campo ${cfg.field_id}: ${id ? 'achou' : 'vazio'}`);
+  }
+
+  if (!id) {
+    const achado = await manychatChamar(
+      '/subscriber/findBySystemField', token, { phone: fone }, 'GET',
+    );
+    const lista = achado?.data;
+    if (Array.isArray(lista) && lista[0]?.id) id = String(lista[0].id);
+    else if (lista?.id) id = String(lista.id);
+    passos.push(`busca phone: ${id ? 'achou' : 'vazio'}`);
+  }
+
+  jaExistia = !!id;
+
+  // ---- 2. criar, se não achou
+  if (!id) {
+    // Para WhatsApp o mínimo é first_name, whatsapp_phone e
+    // consent_phrase. Campo vazio faz o ManyChat recusar em vez de
+    // ignorar, então só mandamos o que tem valor.
+    const corpo: Record<string, any> = {
+      first_name: primeiro,
+      whatsapp_phone: fone,
+      consent_phrase: 'aceitou receber mensagens no formulario de inscricao',
+      has_opt_in_sms: true,
+    };
+    if (ultimo) corpo.last_name = ultimo;
     if (lead.email) {
-      tentativas.push({
-        rota: '/subscriber/findBySystemField',
-        params: { email: String(lead.email) },
-      });
+      corpo.email = String(lead.email);
+      corpo.has_opt_in_email = true;
     }
 
-    for (const t of tentativas) {
-      const achado = await manychatChamar(t.rota, token, t.params, 'GET');
-      const lista = achado?.data;
-      if (Array.isArray(lista) && lista[0]?.id) { id = String(lista[0].id); break; }
-      if (lista?.id) { id = String(lista.id); break; }
-    }
+    const criado = await manychatChamar('/subscriber/createSubscriber', token, corpo);
 
-    if (!id) {
-      // "Validation error" sozinho não diz nada. O detalhe vem em
-      // details.messages, e sem ele o diagnóstico vira adivinhação.
-      const detalhes = criado?.details?.messages;
-      const explicacao = Array.isArray(detalhes)
-        ? detalhes.map((m: any) => `${m.field || ''} ${m.message || ''}`.trim())
-                  .filter(Boolean).join('; ')
-        : (typeof detalhes === 'object' && detalhes !== null
-            ? Object.entries(detalhes)
-                .map(([campo, msg]: any) => `${campo}: ${JSON.stringify(msg)}`)
-                .join('; ')
-            : '');
+    if (criado?.data?.id) {
+      id = String(criado.data.id);
+      passos.push('contato criado');
+    } else {
+      const motivo = motivoManychat(criado);
+
+      // "Permission denied to import" é a trava de conta, não erro de
+      // dados. Sem o suporte liberar, nenhum ajuste de payload resolve —
+      // por isso a mensagem diz o que fazer.
+      const bloqueado = /permission denied|import/i.test(motivo);
 
       return {
         ok: false,
-        erro: [criado?.message, explicacao].filter(Boolean).join(' — ')
-          || 'nao consegui criar nem encontrar o contato',
-        enviado: corpoCriar,
-        // a resposta inteira, porque o ManyChat às vezes põe o motivo
-        // em lugares diferentes de details.messages
+        erro: bloqueado
+          ? `${motivo} — a criacao de contato por API esta bloqueada nesta conta. `
+            + 'Abra um ticket em help.manychat.com pedindo para habilitar '
+            + '"import contacts via API".'
+          : motivo,
+        enviado: corpo,
         resposta: criado,
+        passos,
       };
     }
   }
 
-  // 3. tag, quando configurada
-  const resultado: any = { ok: true, subscriber_id: id, criado: !!criado?.data?.id };
+  const resultado: any = {
+    ok: true, subscriber_id: id, criado: !jaExistia, passos,
+  };
 
-  if (cfg?.tag) {
-    let tag = await manychatChamar('/subscriber/addTagByName', token, {
+  // ---- 3. campo espelho com o número
+  //
+  // É o que permite encontrar o contato na próxima vez. Sem ele, cada
+  // lead repetido vira uma tentativa de criação que falha.
+  if (cfg?.campo_telefone) {
+    await manychatChamar('/subscriber/setCustomFieldByName', token, {
       subscriber_id: id,
-      tag_name: cfg.tag,
+      field_name: cfg.campo_telefone,
+      field_value: fone,
     });
-
-    // addTagByName só funciona com tag que já existe na conta. Na
-    // primeira vez ela não existe, então criamos e tentamos de novo —
-    // sem isso, o lead entra sem tag e o fluxo nunca dispara.
-    if (tag?.status !== 'success') {
-      await manychatChamar('/page/createTag', token, { name: cfg.tag });
-      tag = await manychatChamar('/subscriber/addTagByName', token, {
-        subscriber_id: id,
-        tag_name: cfg.tag,
-      });
-    }
-
-    resultado.tag_aplicada = tag?.status === 'success';
-    if (!resultado.tag_aplicada) {
-      resultado.aviso_tag = tag?.details?.messages?.[0]?.message
-        || tag?.message || `resposta inesperada (${tag?.status})`;
-    }
   }
 
-  // 4. campo com o lançamento, quando configurado: permite o fluxo do
-  //    ManyChat se ramificar sem precisar de uma tag por lançamento
+  // ---- 4. campo do lançamento
   if (cfg?.campo_lancamento && lead.lancamento) {
     await manychatChamar('/subscriber/setCustomFieldByName', token, {
       subscriber_id: id,
       field_name: cfg.campo_lancamento,
-      field_value: lead.lancamento,
+      field_value: String(lead.lancamento),
     });
   }
 
-  // 4b. contato que já existia pode estar com a automação pausada de um
-  //     lançamento anterior. Sem religar, o sendFlow retorna sucesso e a
-  //     mensagem não sai — a pior combinação, porque parece que deu certo.
-  if (!criado?.data?.id) {
-    await manychatChamar('/subscriber/setSystemField', token, {
-      subscriber_id: id,
-      field_name: 'optin_phone',
-      field_value: true,
+  // ---- 5. tag
+  //
+  // Este é o caminho que funciona para contato novo: a automação do
+  // ManyChat com gatilho "tag aplicada" consegue enviar template para
+  // contato inativo, coisa que o sendFlow da API não faz.
+  if (cfg?.tag) {
+    let tag = await manychatChamar('/subscriber/addTagByName', token, {
+      subscriber_id: id, tag_name: cfg.tag,
     });
+
+    // addTagByName exige tag existente; na primeira vez ela não existe
+    if (tag?.status !== 'success') {
+      await manychatChamar('/page/createTag', token, { name: cfg.tag });
+      tag = await manychatChamar('/subscriber/addTagByName', token, {
+        subscriber_id: id, tag_name: cfg.tag,
+      });
+    }
+
+    resultado.tag_aplicada = tag?.status === 'success';
+    if (!resultado.tag_aplicada) resultado.aviso_tag = motivoManychat(tag);
+    passos.push(`tag: ${resultado.tag_aplicada ? 'ok' : 'falhou'}`);
   }
 
-  // 5. disparar o fluxo
-  //
-  // Contato criado por API NÃO dispara gatilho de "novo contato" no
-  // ManyChat: esses gatilhos valem para quem chega por WhatsApp, link ou
-  // comentário. Por API o contato entra inscrito e para por ali.
-  //
-  // Para ele receber a mensagem, o fluxo tem que ser chamado.
+  // ---- 6. fluxo, quando configurado
   if (cfg?.flow_ns) {
     const fluxo = await manychatChamar('/sending/sendFlow', token, {
-      subscriber_id: id,
-      flow_ns: cfg.flow_ns,
+      subscriber_id: id, flow_ns: cfg.flow_ns,
     });
     resultado.fluxo_disparado = fluxo?.status === 'success';
+
     if (!resultado.fluxo_disparado) {
-      resultado.aviso_fluxo = fluxo?.details?.messages?.[0]?.message
-        || fluxo?.message || `resposta inesperada (${fluxo?.status})`;
+      const motivo = motivoManychat(fluxo);
+      resultado.aviso_fluxo = /not active/i.test(motivo)
+        ? `${motivo} — contato que nunca interagiu nao aceita sendFlow. `
+          + 'Use uma tag e deixe a automacao do ManyChat disparar por ela.'
+        : motivo;
     }
+    passos.push(`fluxo: ${resultado.fluxo_disparado ? 'ok' : 'falhou'}`);
   }
 
   return resultado;
@@ -1975,7 +2007,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v48-manychat-busca',
+            versao: 'v49-manychat-revisado',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
