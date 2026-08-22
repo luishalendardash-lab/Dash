@@ -38,6 +38,7 @@ interface Env {
   MANYCHAT_TAG?: string;
   MANYCHAT_FLOW?: string;
   MANYCHAT_CAMPO?: string;
+  MANYCHAT_FIELD_ID?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -561,6 +562,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
           flow_ns: env.MANYCHAT_FLOW || '',
           tag: env.MANYCHAT_TAG || '',
           campo_lancamento: env.MANYCHAT_CAMPO || '',
+          field_id: env.MANYCHAT_FIELD_ID || '',
         },
       );
       // o registro traz o que foi enviado: sem isso, "Validation error"
@@ -568,7 +570,12 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
       if (!r.ok) {
         await db.insert('webhooks_raw', {
           fonte: 'saida_manychat_falhou',
-          body: { enviado: r.enviado, pessoa_id: pessoaId, telefone: dados.telefone },
+          body: {
+            enviado: r.enviado,
+            resposta_manychat: r.resposta,
+            pessoa_id: pessoaId,
+            telefone: dados.telefone,
+          },
           processado: false,
           erro: String(r.erro || 'falha').slice(0, 400),
         }).catch(() => {});
@@ -1757,17 +1764,35 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
     // documenta qual aceita. Com '+' devolve vazio, sem '+' encontra —
     // por isso tentamos as variações em vez de assumir uma.
     const soDigitos = fone.replace(/\D/g, '');
-    const tentativas: Array<Record<string, string>> = [
-      { phone: soDigitos },
-      { phone: fone },
-      { whatsapp_phone: soDigitos },
-    ];
-    if (lead.email) tentativas.push({ email: String(lead.email) });
 
-    for (const busca of tentativas) {
-      const achado = await manychatChamar(
-        '/subscriber/findBySystemField', token, busca, 'GET',
+    // O findBySystemField não encontra contato de WhatsApp — o telefone
+    // dele fica num campo personalizado. Por isso o fluxo antigo do n8n
+    // usava findByCustomField com um field_id fixo: era a única busca
+    // que funcionava. Tentamos as duas, em várias grafias.
+    const tentativas: Array<{ rota: string; params: Record<string, string> }> = [];
+
+    if (cfg?.field_id) {
+      tentativas.push(
+        { rota: '/subscriber/findByCustomField',
+          params: { field_id: String(cfg.field_id), field_value: soDigitos } },
+        { rota: '/subscriber/findByCustomField',
+          params: { field_id: String(cfg.field_id), field_value: fone } },
       );
+    }
+
+    tentativas.push(
+      { rota: '/subscriber/findBySystemField', params: { phone: soDigitos } },
+      { rota: '/subscriber/findBySystemField', params: { phone: fone } },
+    );
+    if (lead.email) {
+      tentativas.push({
+        rota: '/subscriber/findBySystemField',
+        params: { email: String(lead.email) },
+      });
+    }
+
+    for (const t of tentativas) {
+      const achado = await manychatChamar(t.rota, token, t.params, 'GET');
       const lista = achado?.data;
       if (Array.isArray(lista) && lista[0]?.id) { id = String(lista[0].id); break; }
       if (lista?.id) { id = String(lista.id); break; }
@@ -1791,6 +1816,9 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
         erro: [criado?.message, explicacao].filter(Boolean).join(' — ')
           || 'nao consegui criar nem encontrar o contato',
         enviado: corpoCriar,
+        // a resposta inteira, porque o ManyChat às vezes põe o motivo
+        // em lugares diferentes de details.messages
+        resposta: criado,
       };
     }
   }
@@ -1947,7 +1975,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v47-manychat-validacao',
+            versao: 'v48-manychat-busca',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,

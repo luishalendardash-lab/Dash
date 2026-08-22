@@ -1,9 +1,9 @@
 # O que subir para ficar em dia
 
-Versão do Worker no fim disto: **v47-manychat-validacao**
+Versão do Worker no fim disto: **v48-manychat-busca**
 
 Confira em `https://dash.luishalendardash.workers.dev/health` — se aparecer
-`"versao": "v47-manychat-validacao"`, o backend está atualizado.
+`"versao": "v48-manychat-busca"`, o backend está atualizado.
 
 ---
 
@@ -23,6 +23,7 @@ vezes sem estragar nada.
 | 54 | `54_manychat_direto.sql` | ManyChat sem o n8n |
 | 55 | `55_manychat_fluxo.sql` | disparo do fluxo e criação de tag |
 | 56 | `56_manychat_simples.sql` | tira os campos da tela, usa só as variáveis |
+| 57 | `57_data_venda.sql` | corrige data da Hotmart em epoch (webhook 400) |
 
 Se algum der erro, pare e me mande a mensagem. Não pule.
 
@@ -40,6 +41,7 @@ Em **Settings → Variables and Secrets**:
 |------|------|-------|
 | `MANYCHAT_TOKEN` | Secret | o token do ManyChat |
 | `MANYCHAT_FLOW` | Text | `content20260822143758_588317` |
+| `MANYCHAT_FIELD_ID` | Text | `13528011` (o campo do telefone no ManyChat) |
 
 O token antigo apareceu num arquivo compartilhado. Gere um novo em
 ManyChat → Settings → API antes de colar aqui.
