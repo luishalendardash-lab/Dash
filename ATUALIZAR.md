@@ -1,9 +1,9 @@
 # O que subir para ficar em dia
 
-Versão do Worker no fim disto: **v44-manychat-fluxo**
+Versão do Worker no fim disto: **v46-manychat-existente**
 
 Confira em `https://dash.luishalendardash.workers.dev/health` — se aparecer
-`"versao": "v44-manychat-fluxo"`, o backend está atualizado.
+`"versao": "v46-manychat-existente"`, o backend está atualizado.
 
 ---
 
@@ -22,6 +22,7 @@ vezes sem estragar nada.
 | 53 | `53_apagar_lancamento.sql` | apagar lançamento criado por engano |
 | 54 | `54_manychat_direto.sql` | ManyChat sem o n8n |
 | 55 | `55_manychat_fluxo.sql` | disparo do fluxo e criação de tag |
+| 56 | `56_manychat_simples.sql` | tira os campos da tela, usa só as variáveis |
 
 Se algum der erro, pare e me mande a mensagem. Não pule.
 
@@ -73,14 +74,7 @@ Se alguma tela ficar em branco ou mostrar erro, me diga qual.
 
 Em **Integrações → ManyChat (direto)**:
 
-```
-Token da API      →  vazio (usa MANYCHAT_TOKEN)
-Fluxo ao entrar   →  vazio (usa MANYCHAT_FLOW)
-Tag ao entrar     →  vazio (a tag vem do fluxo 1)
-Campo lançamento  →  vazio, ou o nome de um campo personalizado
-```
-
-Marque como **ativa**. Isso desliga o repasse pelo n8n automaticamente.
+Só marque como **ativa**. Não há campos: token e fluxo vêm das variáveis do Worker. Isso desliga o repasse pelo n8n automaticamente.
 
 Teste com um número que **nunca conversou** com o seu ManyChat. Com um
 número que já falou, a janela de 24 horas está aberta e o teste passa

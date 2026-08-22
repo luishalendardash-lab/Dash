@@ -37,6 +37,7 @@ interface Env {
   MANYCHAT_TOKEN?: string;
   MANYCHAT_TAG?: string;
   MANYCHAT_FLOW?: string;
+  MANYCHAT_CAMPO?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -530,21 +531,36 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
   //            workflow montado e não quer mexer.
   const cfgDireto = await segredoIntegracao('manychat_api', 'token', db);
 
-  // O token pode vir da tela ou de um secret do Worker. O secret serve
-  // de reserva: se alguém apagar o campo por engano, o envio continua.
-  const tokenManychat = (cfgDireto?.ativa && cfgDireto?.valor) || env.MANYCHAT_TOKEN;
-  const usarDireto = tokenManychat
-    && (cfgDireto?.ativa !== false || !!env.MANYCHAT_TOKEN);
+  // Token e fluxo vivem nas variáveis do Worker. A tela só liga e
+  // desliga — sem campos para preencher, não há como salvar um valor
+  // errado que passe a valer sobre a variável.
+  const tokenManychat = env.MANYCHAT_TOKEN || '';
+  const usarDireto = !!(cfgDireto?.ativa && tokenManychat);
+
+  if (cfgDireto?.ativa && !tokenManychat) {
+    // ativa na tela mas sem o secret: o lead sumiria sem explicação
+    await db.insert('webhooks_raw', {
+      fonte: 'manychat_sem_token',
+      body: { pessoa_id: pessoaId },
+      processado: false,
+      erro: 'ManyChat esta ativo mas MANYCHAT_TOKEN nao esta configurado no Worker',
+    }).catch(() => {});
+  }
 
   if (usarDireto) {
     try {
       const r = await enviarManychat(
-        { nome: dados.nome, telefone: dados.telefone, lancamento: dados.lancamento },
+        {
+          nome: dados.nome,
+          email: dados.email,
+          telefone: dados.telefone,
+          lancamento: dados.lancamento,
+        },
         {
           token: tokenManychat,
-          tag: cfgDireto?.config?.tag || env.MANYCHAT_TAG || '',
-          campo_lancamento: cfgDireto?.config?.campo_lancamento || '',
-          flow_ns: cfgDireto?.config?.flow_ns || env.MANYCHAT_FLOW || '',
+          flow_ns: env.MANYCHAT_FLOW || '',
+          tag: env.MANYCHAT_TAG || '',
+          campo_lancamento: env.MANYCHAT_CAMPO || '',
         },
       );
       if (!r.ok) throw new Error(r.erro || 'falha no ManyChat');
@@ -1712,19 +1728,34 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
   if (criado?.data?.id) {
     id = String(criado.data.id);
   } else {
-    // 2. já existe: procura pelo telefone
-    const achado = await manychatChamar(
-      '/subscriber/findBySystemField', token, { phone: fone }, 'GET',
-    );
-    const lista = achado?.data;
-    if (Array.isArray(lista) && lista[0]?.id) id = String(lista[0].id);
-    else if (lista?.id) id = String(lista.id);
+    // 2. já existe: procura o contato
+    //
+    // O ManyChat é exigente com o formato do telefone na busca e não
+    // documenta qual aceita. Com '+' devolve vazio, sem '+' encontra —
+    // por isso tentamos as variações em vez de assumir uma.
+    const soDigitos = fone.replace(/\D/g, '');
+    const tentativas: Array<Record<string, string>> = [
+      { phone: soDigitos },
+      { phone: fone },
+      { whatsapp_phone: soDigitos },
+    ];
+    if (lead.email) tentativas.push({ email: String(lead.email) });
+
+    for (const busca of tentativas) {
+      const achado = await manychatChamar(
+        '/subscriber/findBySystemField', token, busca, 'GET',
+      );
+      const lista = achado?.data;
+      if (Array.isArray(lista) && lista[0]?.id) { id = String(lista[0].id); break; }
+      if (lista?.id) { id = String(lista.id); break; }
+    }
 
     if (!id) {
       return {
         ok: false,
         erro: criado?.details?.messages?.[0]?.message
           || criado?.message || 'nao consegui criar nem encontrar o contato',
+        tentado: soDigitos,
       };
     }
   }
@@ -1763,6 +1794,17 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
       subscriber_id: id,
       field_name: cfg.campo_lancamento,
       field_value: lead.lancamento,
+    });
+  }
+
+  // 4b. contato que já existia pode estar com a automação pausada de um
+  //     lançamento anterior. Sem religar, o sendFlow retorna sucesso e a
+  //     mensagem não sai — a pior combinação, porque parece que deu certo.
+  if (!criado?.data?.id) {
+    await manychatChamar('/subscriber/setSystemField', token, {
+      subscriber_id: id,
+      field_name: 'optin_phone',
+      field_value: true,
     });
   }
 
@@ -1870,7 +1912,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v44-manychat-fluxo',
+            versao: 'v46-manychat-existente',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
