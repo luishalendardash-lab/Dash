@@ -549,7 +549,7 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
 
   if (usarDireto) {
     try {
-      const r = await enviarManychat(
+      const r: any = await enviarManychat(
         {
           nome: dados.nome,
           email: dados.email,
@@ -563,7 +563,20 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
           campo_lancamento: env.MANYCHAT_CAMPO || '',
         },
       );
-      if (!r.ok) throw new Error(r.erro || 'falha no ManyChat');
+      // o registro traz o que foi enviado: sem isso, "Validation error"
+      // não diz qual campo o ManyChat recusou
+      if (!r.ok) {
+        await db.insert('webhooks_raw', {
+          fonte: 'saida_manychat_falhou',
+          body: { enviado: r.enviado, pessoa_id: pessoaId, telefone: dados.telefone },
+          processado: false,
+          erro: String(r.erro || 'falha').slice(0, 400),
+        }).catch(() => {});
+        // marca para o catch não registrar de novo o mesmo erro
+        const jaRegistrado = new Error(r.erro || 'falha no ManyChat');
+        (jaRegistrado as any).registrado = true;
+        throw jaRegistrado;
+      }
 
       // tag que não aplicou não derruba o lead, mas fica registrada:
       // sem ela o fluxo do WhatsApp pode não disparar
@@ -578,12 +591,14 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
         }).catch(() => {});
       }
     } catch (e: any) {
-      await db.insert('webhooks_raw', {
-        fonte: 'saida_manychat_falhou',
-        body: { dados, pessoa_id: pessoaId },
-        processado: false,
-        erro: String(e?.message || e).slice(0, 400),
-      }).catch(() => {});
+      if (!e?.registrado) {
+        await db.insert('webhooks_raw', {
+          fonte: 'saida_manychat_falhou',
+          body: { dados, pessoa_id: pessoaId },
+          processado: false,
+          erro: String(e?.message || e).slice(0, 400),
+        }).catch(() => {});
+      }
     }
   } else if (urlManychat) {
     try {
@@ -1710,20 +1725,28 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
   if (!fone) return { ok: false, erro: 'lead sem telefone' };
 
   const nome = String(lead.nome || lead.name || '').trim();
-  const partes = nome.split(/\s+/);
+  const partes = nome.split(/\s+/).filter(Boolean);
   const primeiro = partes[0] || 'Lead';
   const ultimo = partes.length > 1 ? partes.slice(1).join(' ') : '';
 
   // 1. tenta criar
-  let id = '';
-  const criado = await manychatChamar('/subscriber/createSubscriber', token, {
+  //
+  // O ManyChat recusa campo vazio com "Validation error" em vez de
+  // ignorá-lo, então last_name só vai quando existe. O consent_phrase é
+  // obrigatório para WhatsApp e precisa ter ao menos algumas letras.
+  const corpoCriar: Record<string, any> = {
     first_name: primeiro,
-    last_name: ultimo,
-    phone: fone,
     whatsapp_phone: fone,
     has_opt_in_sms: true,
-    consent_phrase: 'sim',
-  });
+    consent_phrase: 'aceito receber mensagens',
+  };
+  if (ultimo) corpoCriar.last_name = ultimo;
+  if (lead.email) corpoCriar.email = String(lead.email);
+
+  let id = '';
+  const criado = await manychatChamar(
+    '/subscriber/createSubscriber', token, corpoCriar,
+  );
 
   if (criado?.data?.id) {
     id = String(criado.data.id);
@@ -1751,11 +1774,23 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
     }
 
     if (!id) {
+      // "Validation error" sozinho não diz nada. O detalhe vem em
+      // details.messages, e sem ele o diagnóstico vira adivinhação.
+      const detalhes = criado?.details?.messages;
+      const explicacao = Array.isArray(detalhes)
+        ? detalhes.map((m: any) => `${m.field || ''} ${m.message || ''}`.trim())
+                  .filter(Boolean).join('; ')
+        : (typeof detalhes === 'object' && detalhes !== null
+            ? Object.entries(detalhes)
+                .map(([campo, msg]: any) => `${campo}: ${JSON.stringify(msg)}`)
+                .join('; ')
+            : '');
+
       return {
         ok: false,
-        erro: criado?.details?.messages?.[0]?.message
-          || criado?.message || 'nao consegui criar nem encontrar o contato',
-        tentado: soDigitos,
+        erro: [criado?.message, explicacao].filter(Boolean).join(' — ')
+          || 'nao consegui criar nem encontrar o contato',
+        enviado: corpoCriar,
       };
     }
   }
@@ -1912,7 +1947,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v46-manychat-existente',
+            versao: 'v47-manychat-validacao',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,

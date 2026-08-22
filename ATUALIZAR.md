@@ -1,9 +1,9 @@
 # O que subir para ficar em dia
 
-Versão do Worker no fim disto: **v46-manychat-existente**
+Versão do Worker no fim disto: **v47-manychat-validacao**
 
 Confira em `https://dash.luishalendardash.workers.dev/health` — se aparecer
-`"versao": "v46-manychat-existente"`, o backend está atualizado.
+`"versao": "v47-manychat-validacao"`, o backend está atualizado.
 
 ---
 
