@@ -36,6 +36,7 @@ interface Env {
   TMB_TOKEN?: string;            // reserva; o normal é configurar pela tela
   MANYCHAT_TOKEN?: string;
   MANYCHAT_TAG?: string;
+  MANYCHAT_FLOW?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -543,17 +544,21 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
           token: tokenManychat,
           tag: cfgDireto?.config?.tag || env.MANYCHAT_TAG || '',
           campo_lancamento: cfgDireto?.config?.campo_lancamento || '',
+          flow_ns: cfgDireto?.config?.flow_ns || env.MANYCHAT_FLOW || '',
         },
       );
       if (!r.ok) throw new Error(r.erro || 'falha no ManyChat');
 
       // tag que não aplicou não derruba o lead, mas fica registrada:
       // sem ela o fluxo do WhatsApp pode não disparar
-      if (r.aviso_tag) {
+      if (r.aviso_tag || r.aviso_fluxo) {
         await db.insert('webhooks_raw', {
-          fonte: 'manychat_tag_falhou',
-          body: { subscriber_id: r.subscriber_id, aviso: r.aviso_tag },
-          processado: true,
+          fonte: 'manychat_parcial',
+          body: { subscriber_id: r.subscriber_id },
+          processado: false,
+          erro: [r.aviso_tag && `tag: ${r.aviso_tag}`,
+                 r.aviso_fluxo && `fluxo: ${r.aviso_fluxo}`]
+                .filter(Boolean).join(' | ').slice(0, 400),
         }).catch(() => {});
       }
     } catch (e: any) {
@@ -1728,13 +1733,26 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
   const resultado: any = { ok: true, subscriber_id: id, criado: !!criado?.data?.id };
 
   if (cfg?.tag) {
-    const tag = await manychatChamar('/subscriber/addTagByName', token, {
+    let tag = await manychatChamar('/subscriber/addTagByName', token, {
       subscriber_id: id,
       tag_name: cfg.tag,
     });
-    resultado.tag_aplicada = tag?.status === 'success' || tag?.status === 200;
+
+    // addTagByName só funciona com tag que já existe na conta. Na
+    // primeira vez ela não existe, então criamos e tentamos de novo —
+    // sem isso, o lead entra sem tag e o fluxo nunca dispara.
+    if (tag?.status !== 'success') {
+      await manychatChamar('/page/createTag', token, { name: cfg.tag });
+      tag = await manychatChamar('/subscriber/addTagByName', token, {
+        subscriber_id: id,
+        tag_name: cfg.tag,
+      });
+    }
+
+    resultado.tag_aplicada = tag?.status === 'success';
     if (!resultado.tag_aplicada) {
-      resultado.aviso_tag = tag?.message || 'nao consegui aplicar a tag';
+      resultado.aviso_tag = tag?.details?.messages?.[0]?.message
+        || tag?.message || `resposta inesperada (${tag?.status})`;
     }
   }
 
@@ -1746,6 +1764,25 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
       field_name: cfg.campo_lancamento,
       field_value: lead.lancamento,
     });
+  }
+
+  // 5. disparar o fluxo
+  //
+  // Contato criado por API NÃO dispara gatilho de "novo contato" no
+  // ManyChat: esses gatilhos valem para quem chega por WhatsApp, link ou
+  // comentário. Por API o contato entra inscrito e para por ali.
+  //
+  // Para ele receber a mensagem, o fluxo tem que ser chamado.
+  if (cfg?.flow_ns) {
+    const fluxo = await manychatChamar('/sending/sendFlow', token, {
+      subscriber_id: id,
+      flow_ns: cfg.flow_ns,
+    });
+    resultado.fluxo_disparado = fluxo?.status === 'success';
+    if (!resultado.fluxo_disparado) {
+      resultado.aviso_fluxo = fluxo?.details?.messages?.[0]?.message
+        || fluxo?.message || `resposta inesperada (${fluxo?.status})`;
+    }
   }
 
   return resultado;
@@ -1833,7 +1870,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v43-manychat-direto',
+            versao: 'v44-manychat-fluxo',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
