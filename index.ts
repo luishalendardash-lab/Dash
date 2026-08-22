@@ -515,12 +515,44 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
     }
   }
 
-  // --- n8n -> ManyChat
-  // O destino é um fluxo do n8n que cria ou atualiza o contato no
-  // ManyChat, aplica a tag e entra no fluxo. O n8n aceita os dois
-  // formatos; o que importa é o nome dos campos bater com o que o
-  // workflow lê. Por isso o formato é escolhido na tela.
-  if (urlManychat) {
+  // --- ManyChat
+  //
+  // Dois caminhos, escolhidos na tela de Integrações:
+  //
+  //   DIRETO   a dash fala com a API do ManyChat. Cria o contato ou, se
+  //            já existir, encontra pelo telefone. Menos uma peça no
+  //            meio e a falha aparece na hora.
+  //
+  //   VIA n8n  mantém o webhook intermediário, para quem já tem o
+  //            workflow montado e não quer mexer.
+  const cfgDireto = await segredoIntegracao('manychat_api', 'token', db);
+
+  if (cfgDireto?.ativa && cfgDireto?.valor) {
+    try {
+      const r = await enviarManychat(
+        { nome: dados.nome, telefone: dados.telefone, lancamento: dados.lancamento },
+        { token: cfgDireto.valor, ...(cfgDireto.config || {}) },
+      );
+      if (!r.ok) throw new Error(r.erro || 'falha no ManyChat');
+
+      // tag que não aplicou não derruba o lead, mas fica registrada:
+      // sem ela o fluxo do WhatsApp pode não disparar
+      if (r.aviso_tag) {
+        await db.insert('webhooks_raw', {
+          fonte: 'manychat_tag_falhou',
+          body: { subscriber_id: r.subscriber_id, aviso: r.aviso_tag },
+          processado: true,
+        }).catch(() => {});
+      }
+    } catch (e: any) {
+      await db.insert('webhooks_raw', {
+        fonte: 'saida_manychat_falhou',
+        body: { dados, pessoa_id: pessoaId },
+        processado: false,
+        erro: String(e?.message || e).slice(0, 400),
+      }).catch(() => {});
+    }
+  } else if (urlManychat) {
     try {
       const comoJson = (cfgManychat?.config?.formato || 'json') === 'json';
 
@@ -1594,6 +1626,120 @@ async function importarCampanhasEscolhidas(
 }
 
 // =====================================================================
+// MANYCHAT DIRETO
+//
+// Substitui o intermediário do n8n. A lógica é a mesma que ele fazia:
+// tenta criar o contato; se já existe, procura pelo telefone e usa o id
+// que voltou. A tag é opcional — quando o fluxo do ManyChat dispara na
+// criação do contato, ela não é necessária.
+//
+// Vantagem de estar aqui: a dash sabe se deu certo. No n8n, uma falha de
+// autenticação passava em silêncio e o lead sumia sem aviso.
+// =====================================================================
+const MANYCHAT_API = 'https://api.manychat.com/fb';
+
+async function manychatChamar(
+  caminho: string, token: string, corpo: any, metodo = 'POST',
+): Promise<any> {
+  const cabecalho: Record<string, string> = {
+    accept: 'application/json',
+    // o token do ManyChat já vem no formato id:hash — o Bearer é nosso
+    Authorization: `Bearer ${String(token).replace(/^Bearer\s+/i, '')}`,
+  };
+
+  let url = `${MANYCHAT_API}${caminho}`;
+  let opcoes: RequestInit = { method: metodo, headers: cabecalho };
+
+  if (metodo === 'GET') {
+    url += '?' + new URLSearchParams(corpo);
+  } else {
+    cabecalho['Content-Type'] = 'application/json';
+    opcoes = { method: metodo, headers: cabecalho, body: JSON.stringify(corpo) };
+  }
+
+  const r = await fetch(url, opcoes);
+  const d: any = await r.json().catch(() => ({}));
+  return { status: r.status, ...d };
+}
+
+/** Telefone no formato que o ManyChat aceita: +55 e só dígitos. */
+function foneManychat(fone: string): string {
+  const d = String(fone || '').replace(/\D/g, '');
+  if (!d) return '';
+  return d.startsWith('55') ? `+${d}` : `+55${d}`;
+}
+
+async function enviarManychat(lead: any, cfg: any): Promise<any> {
+  const token = cfg?.token || '';
+  if (!token) return { ok: false, erro: 'token do ManyChat nao configurado' };
+
+  const fone = foneManychat(lead.telefone || lead.phone);
+  if (!fone) return { ok: false, erro: 'lead sem telefone' };
+
+  const nome = String(lead.nome || lead.name || '').trim();
+  const partes = nome.split(/\s+/);
+  const primeiro = partes[0] || 'Lead';
+  const ultimo = partes.length > 1 ? partes.slice(1).join(' ') : '';
+
+  // 1. tenta criar
+  let id = '';
+  const criado = await manychatChamar('/subscriber/createSubscriber', token, {
+    first_name: primeiro,
+    last_name: ultimo,
+    phone: fone,
+    whatsapp_phone: fone,
+    has_opt_in_sms: true,
+    consent_phrase: 'sim',
+  });
+
+  if (criado?.data?.id) {
+    id = String(criado.data.id);
+  } else {
+    // 2. já existe: procura pelo telefone
+    const achado = await manychatChamar(
+      '/subscriber/findBySystemField', token, { phone: fone }, 'GET',
+    );
+    const lista = achado?.data;
+    if (Array.isArray(lista) && lista[0]?.id) id = String(lista[0].id);
+    else if (lista?.id) id = String(lista.id);
+
+    if (!id) {
+      return {
+        ok: false,
+        erro: criado?.details?.messages?.[0]?.message
+          || criado?.message || 'nao consegui criar nem encontrar o contato',
+      };
+    }
+  }
+
+  // 3. tag, quando configurada
+  const resultado: any = { ok: true, subscriber_id: id, criado: !!criado?.data?.id };
+
+  if (cfg?.tag) {
+    const tag = await manychatChamar('/subscriber/addTagByName', token, {
+      subscriber_id: id,
+      tag_name: cfg.tag,
+    });
+    resultado.tag_aplicada = tag?.status === 'success' || tag?.status === 200;
+    if (!resultado.tag_aplicada) {
+      resultado.aviso_tag = tag?.message || 'nao consegui aplicar a tag';
+    }
+  }
+
+  // 4. campo com o lançamento, quando configurado: permite o fluxo do
+  //    ManyChat se ramificar sem precisar de uma tag por lançamento
+  if (cfg?.campo_lancamento && lead.lancamento) {
+    await manychatChamar('/subscriber/setCustomFieldByName', token, {
+      subscriber_id: id,
+      field_name: cfg.campo_lancamento,
+      field_value: lead.lancamento,
+    });
+  }
+
+  return resultado;
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -1675,7 +1821,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v41-campanhas-periodo',
+            versao: 'v43-manychat-direto',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2150,6 +2296,19 @@ export default {
             },
           });
           return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'previa-apagar') {
+          const r = await db.rpc('previa_apagar_lancamento', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'apagar-lancamento' && req.method === 'POST') {
+          const corpo = await req.json().catch(() => ({}));
+          const r = await db.rpc('apagar_lancamento', {
+            p: { lancamento: slug, confirmar: (corpo as any).confirmar || '' },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'escopo-lancamento' && req.method === 'POST') {

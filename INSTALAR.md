@@ -102,7 +102,7 @@ Opcionais (dá para configurar pela tela de Integrações em vez destes):
 Abra `/health`. Precisa aparecer:
 
 ```
-"versao": "v41-campanhas-periodo"
+"versao": "v43-manychat-direto"
 ```
 
 Se a versão não mudou, o deploy não pegou. Verifique em Deployments; muitas vezes é o cache de build.
