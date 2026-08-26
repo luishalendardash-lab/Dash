@@ -11,6 +11,9 @@
 
 set search_path = dash, public;
 
+-- recarrega o cache do PostgREST antes de diagnosticar
+notify pgrst, 'reload schema';
+
 with esperadas(funcao, arquivo) as (values
   ('ingest_lead',                '02_rpc_ingest.sql'),
   ('ingest_venda',               '02_rpc_ingest.sql'),
@@ -57,8 +60,9 @@ with esperadas(funcao, arquivo) as (values
   ('registrar_recuperacao',      '64_recuperacao.sql')
 )
 select
-  e.arquivo as rode_este_arquivo,
-  string_agg(e.funcao, ', ' order by e.funcao) as funcoes_faltando
+  coalesce(e.arquivo, '(nenhum)') as rode_este_arquivo,
+  string_agg(e.funcao, ', ' order by e.funcao) as funcoes_faltando,
+  count(*) as quantas
 from esperadas e
 where not exists (
   select 1 from pg_proc p
@@ -66,13 +70,23 @@ where not exists (
   where n.nspname = 'public' and p.proname = e.funcao
 )
 group by e.arquivo
-order by e.arquivo;
 
--- ---------------------------------------------------------------------
--- Se a consulta acima não devolver nada, está tudo instalado.
--- Nesse caso o problema é o cache do PostgREST — o comando abaixo o
--- recarrega sem precisar reiniciar nada.
--- ---------------------------------------------------------------------
-notify pgrst, 'reload schema';
+union all
 
-select 'cache recarregado. Se ainda faltar funcao, rode os arquivos acima.' as observacao;
+-- linha de resumo: sem ela, resultado vazio parece consulta quebrada
+select '=== TOTAL ===',
+       case when count(*) = 0 then 'tudo instalado'
+            else count(*)::text || ' funcoes faltando' end,
+       count(*)
+from esperadas e
+where not exists (
+  select 1 from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = e.funcao
+)
+
+order by 1;
+
+-- (o notify foi para o topo: o SQL Editor do Supabase mostra apenas o
+--  resultado da ÚLTIMA instrução, então o diagnóstico precisa ficar por
+--  último para você conseguir vê-lo)

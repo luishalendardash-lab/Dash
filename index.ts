@@ -1983,11 +1983,21 @@ async function sincronizarInvestimento(
   const erros: string[] = [];
 
   for (const conta of contas) {
+    // Nível de ANÚNCIO, não de campanha.
+    //
+    // O lead traz o nome do anúncio na UTM ({{ad.name}}), então o gasto
+    // precisa vir na mesma camada para casar. Em nível de campanha o
+    // total do lançamento fica certo, mas o CPL por criativo nunca
+    // aparece — os nomes são de coisas diferentes.
+    //
+    // O nome da campanha continua vindo junto: é dele que sai a data
+    // que decide a qual lançamento o gasto pertence.
     const qs = new URLSearchParams({
-      level: 'campaign',
+      level: 'ad',
       time_range: periodo,
       time_increment: '1',
-      fields: 'campaign_id,campaign_name,spend,impressions,clicks,date_start',
+      fields: 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,'
+            + 'spend,impressions,clicks,date_start',
       limit: '500',
       access_token: env.META_TOKEN,
     });
@@ -1996,16 +2006,22 @@ async function sincronizarInvestimento(
       `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
     let paginas = 0;
 
-    // um ano de dados diários passa de mil linhas: paginar é obrigatório
-    while (url && paginas < 60) {
+    // um ano de dados diários por anúncio passa de mil linhas
+    while (url && paginas < 80) {
       const r = await fetch(url);
       const d: any = await r.json().catch(() => ({}));
       if (d.error) { erros.push(`${conta}: ${d.error.message}`); break; }
 
       for (const l of d.data || []) {
         campanhas.push({
-          id: `${l.campaign_id}-${l.date_start}`,
-          nome: l.campaign_name,
+          // o id do anúncio é o que casa com o meta_ad_id do lead
+          id: l.ad_id,
+          nome: l.ad_name,
+          // a data do lançamento sai do nome da campanha
+          campanha: l.campaign_name,
+          campanha_id: l.campaign_id,
+          conjunto: l.adset_name,
+          conjunto_id: l.adset_id,
           conta,
           gasto: l.spend,
           impressoes: l.impressions,
@@ -2274,7 +2290,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v55-origem-investimento',
+            versao: 'v56-gasto-por-anuncio',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
