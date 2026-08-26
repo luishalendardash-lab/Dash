@@ -677,8 +677,21 @@ async function processar(
       case 'manychat':
         resultado = await db.rpc('ingest_evento', { p: parseManychat(body, lp, rawId) }); break;
       case 'hotmart':
-      case 'guru':
-        resultado = await db.rpc('ingest_venda', { p: parseHotmart(body, lp, rawId) }); break;
+      case 'guru': {
+        // evento que não é compra sai daqui como processado, não como
+        // erro: ele chegou certo, só não interessa para a dash
+        if (fonte === 'hotmart' && !ehVendaHotmart(body)) {
+          if (rawId) {
+            await db.update('webhooks_raw', { id: `eq.${rawId}` }, {
+              processado: true,
+              erro: `ignorado: ${String(body?.event || 'evento sem venda')}`,
+            }, 'dash').catch(() => {});
+          }
+          return;
+        }
+        resultado = await db.rpc('ingest_venda', { p: parseHotmart(body, lp, rawId) });
+        break;
+      }
       case 'kiwify':
         resultado = await db.rpc('ingest_venda', { p: parseKiwify(body, lp, rawId) }); break;
       case 'herospark':
@@ -1926,6 +1939,126 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
 }
 
 // =====================================================================
+// INVESTIMENTO DE TODOS OS LANÇAMENTOS, DE UMA VEZ
+//
+// Busca as campanhas na API do Meta e deixa o banco distribuir o gasto
+// pelos lançamentos usando a data no nome. Serve tanto para preencher o
+// histórico quanto para rodar no cron, semana a semana.
+// =====================================================================
+async function sincronizarInvestimento(
+  db: Supabase, env: Env, opcoes: { de?: string; ate?: string; todas?: boolean } = {},
+): Promise<any> {
+  if (!env.META_TOKEN) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const plano = await db.rpc('periodo_investimento', {
+    p: { de: opcoes.de || '', ate: opcoes.ate || '' },
+  });
+
+  const contas: string[] = plano?.contas || [];
+  if (!contas.length) {
+    return { ok: false, erro: 'nenhuma conta de anuncio configurada em Ajustes' };
+  }
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const periodo = JSON.stringify({ since: plano.de, until: plano.ate });
+  const campanhas: any[] = [];
+  const erros: string[] = [];
+
+  for (const conta of contas) {
+    const qs = new URLSearchParams({
+      level: 'campaign',
+      time_range: periodo,
+      time_increment: '1',
+      fields: 'campaign_id,campaign_name,spend,impressions,clicks,date_start',
+      limit: '500',
+      access_token: env.META_TOKEN,
+    });
+
+    let url: string | null =
+      `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
+    let paginas = 0;
+
+    // um ano de dados diários passa de mil linhas: paginar é obrigatório
+    while (url && paginas < 60) {
+      const r = await fetch(url);
+      const d: any = await r.json().catch(() => ({}));
+      if (d.error) { erros.push(`${conta}: ${d.error.message}`); break; }
+
+      for (const l of d.data || []) {
+        campanhas.push({
+          id: `${l.campaign_id}-${l.date_start}`,
+          nome: l.campaign_name,
+          conta,
+          gasto: l.spend,
+          impressoes: l.impressions,
+          cliques: l.clicks,
+          dia: l.date_start,
+        });
+      }
+      url = d.paging?.next || null;
+      paginas++;
+    }
+  }
+
+  if (!campanhas.length) {
+    return {
+      ok: false,
+      erro: erros.length ? erros[0] : 'o Meta nao devolveu gasto nesse periodo',
+      periodo: { de: plano.de, ate: plano.ate },
+    };
+  }
+
+  // lotes: um payload de milhares de linhas estoura o limite do Postgres
+  const total: any = {
+    campanhas: 0, gasto: 0, fora_de_captacao: 0, sem_data_no_nome: 0,
+  };
+  const porLanc: Record<string, number> = {};
+
+  for (let i = 0; i < campanhas.length; i += 400) {
+    const r = await db.rpc('ingest_investimento', {
+      p: {
+        campanhas: campanhas.slice(i, i + 400),
+        so_captacao: !opcoes.todas,
+      },
+    });
+    total.campanhas += r?.campanhas || 0;
+    total.gasto += Number(r?.gasto || 0);
+    total.fora_de_captacao += r?.fora_de_captacao || 0;
+    total.sem_data_no_nome += r?.sem_data_no_nome || 0;
+    for (const [slug, valor] of Object.entries(r?.por_lancamento || {})) {
+      porLanc[slug] = (porLanc[slug] || 0) + Number(valor);
+    }
+  }
+
+  return {
+    ok: true,
+    ...total,
+    gasto: Number(total.gasto.toFixed(2)),
+    linhas: campanhas.length,
+    periodo: { de: plano.de, ate: plano.ate },
+    por_lancamento: porLanc,
+    avisos: erros.length ? erros : undefined,
+  };
+}
+
+/**
+ * A Hotmart manda muito mais que venda no mesmo webhook: aluno abriu a
+ * área de membros, terminou um módulo, assinatura trocou de plano. Nada
+ * disso é compra, e tentar gravar como venda enche o log de erro e
+ * esconde os problemas de verdade.
+ *
+ * Só evento que começa com PURCHASE é venda.
+ */
+const EVENTOS_VENDA_HOTMART = /^PURCHASE_/i;
+
+function ehVendaHotmart(body: any): boolean {
+  const evento = String(body?.event || body?.data?.event || '').trim();
+  // sem campo de evento, é payload antigo (v1) — esses só traziam venda
+  if (!evento) return true;
+  return EVENTOS_VENDA_HOTMART.test(evento);
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -2007,7 +2140,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v49-manychat-revisado',
+            versao: 'v51-hotmart-eventos',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2381,6 +2514,20 @@ export default {
           return jsonResponse(r, r.ok ? 200 : 400, ch);
         }
 
+        if (partes[1] === 'sincronizar-investimento') {
+          const r = await sincronizarInvestimento(db, env, {
+            de: url.searchParams.get('de') || '',
+            ate: url.searchParams.get('ate') || '',
+            todas: url.searchParams.get('todas') === '1',
+          });
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'sem-investimento') {
+          const r = await db.rpc('lancamentos_sem_investimento', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
         if (partes[1] === 'buscar-campanhas') {
           const r = await buscarCampanhasPeriodo(slug, db, env);
           return jsonResponse(r, r.ok ? 200 : 400, ch);
@@ -2674,6 +2821,25 @@ export default {
           select: 'slug',
           status: 'in.(captacao,aquecimento,evento,carrinho)',
         });
+        // o investimento roda uma vez por hora, cobrindo os últimos 30
+        // dias: campanha nova entra sozinha, sem ninguém apertar botão
+        try {
+          const inv = await sincronizarInvestimento(db, env, {
+            de: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+          });
+          if (!inv.ok) {
+            await db.insert('webhooks_raw', {
+              fonte: 'sync_investimento_falhou', body: {},
+              processado: false, erro: String(inv.erro).slice(0, 400),
+            }).catch(() => {});
+          }
+        } catch (e: any) {
+          await db.insert('webhooks_raw', {
+            fonte: 'sync_investimento_falhou', body: {},
+            processado: false, erro: String(e?.message || e).slice(0, 400),
+          }).catch(() => {});
+        }
+
         for (const l of ativos) {
           try {
             // venda pode chegar antes do lead existir; isso religa as pontas
