@@ -2274,7 +2274,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v54-recuperacao',
+            versao: 'v55-origem-investimento',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2699,6 +2699,19 @@ export default {
               fonte: url.searchParams.get('fonte') || '',
               limite: Number(url.searchParams.get('limite') || 500),
             },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'origem-investimento') {
+          const r = await db.rpc('investimento_por_origem', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'limpar-investimento' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('limpar_investimento', {
+            p: { origem: corpo.origem || 'tudo', lancamento: corpo.lancamento || '' },
           });
           return jsonResponse(r, 200, ch);
         }
