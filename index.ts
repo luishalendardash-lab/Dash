@@ -41,6 +41,7 @@ interface Env {
   MANYCHAT_FIELD_ID?: string;
   MANYCHAT_CAMPO_FONE?: string;
   META_CONTAS?: string;
+  MANYCHAT_TAG_RECUPERACAO?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -2076,6 +2077,122 @@ function ehVendaHotmart(body: any): boolean {
 }
 
 // =====================================================================
+// RECUPERAÇÃO DE PAGAMENTO PENDENTE
+//
+// PIX e boleto gerados que ainda não foram pagos. O disparo vai pelos
+// mesmos caminhos que o lead novo usa — SellFlux para e-mail, ManyChat
+// para WhatsApp — então não há integração nova para configurar.
+//
+// Cada envio fica registrado. Quem recebeu nas últimas 24 horas não
+// entra de novo, mesmo que você clique duas vezes.
+// =====================================================================
+async function dispararRecuperacao(
+  slug: string, canal: string, ids: string[], db: Supabase, env: Env,
+): Promise<any> {
+  const plano = await db.rpc('alvos_recuperacao', {
+    p: { lancamento: slug, canal, ids },
+  });
+
+  const alvos: any[] = plano?.alvos || [];
+  if (!alvos.length) {
+    return { ok: true, enviados: 0, aviso: 'ninguem novo para enviar' };
+  }
+
+  const envios: any[] = [];
+  let enviados = 0;
+  let falhas = 0;
+
+  if (canal === 'email') {
+    const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
+    const url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT;
+    if (!url) {
+      return { ok: false, erro: 'SellFlux nao configurado em Integracoes' };
+    }
+
+    for (const a of alvos) {
+      try {
+        // mesmo formato do lead novo, com a tag que separa quem é
+        // recuperação — o fluxo do SellFlux se ramifica por ela
+        const corpo = new URLSearchParams({
+          name: a.nome || '',
+          email: a.email || '',
+          phone: String(a.telefone || '').replace(/\D/g, '').slice(-11),
+          ddi: '55',
+          tag: `recuperacao-${slug}`,
+          produto: a.produto || '',
+          valor: String(a.valor || ''),
+        });
+
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: corpo.toString(),
+        });
+
+        const deuCerto = r.ok;
+        if (deuCerto) enviados++; else falhas++;
+        envios.push({
+          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
+          resultado: deuCerto ? 'enviado' : 'falhou',
+          erro: deuCerto ? null : `http ${r.status}`,
+        });
+      } catch (e: any) {
+        falhas++;
+        envios.push({
+          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
+          resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
+        });
+      }
+    }
+  }
+
+  if (canal === 'whatsapp') {
+    const token = env.MANYCHAT_TOKEN || '';
+    if (!token) {
+      return { ok: false, erro: 'MANYCHAT_TOKEN nao configurado no Worker' };
+    }
+
+    for (const a of alvos) {
+      try {
+        const r = await enviarManychat(
+          { nome: a.nome, email: a.email, telefone: a.telefone, lancamento: slug },
+          {
+            token,
+            // tag própria de recuperação: a automação do ManyChat
+            // dispara por ela, sem misturar com o fluxo de lead novo
+            tag: env.MANYCHAT_TAG_RECUPERACAO || `recuperacao-${slug}`,
+            campo_lancamento: env.MANYCHAT_CAMPO || '',
+            campo_telefone: env.MANYCHAT_CAMPO_FONE || '',
+            field_id: env.MANYCHAT_FIELD_ID || '',
+          },
+        );
+
+        if (r.ok) enviados++; else falhas++;
+        envios.push({
+          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
+          resultado: r.ok ? 'enviado' : 'falhou',
+          erro: r.ok ? null : String(r.erro || '').slice(0, 200),
+        });
+      } catch (e: any) {
+        falhas++;
+        envios.push({
+          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
+          resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
+        });
+      }
+    }
+  }
+
+  await db.rpc('registrar_recuperacao', { p: { envios } }).catch(() => {});
+
+  return {
+    ok: true, canal, enviados, falhas,
+    total: alvos.length,
+    primeiro_erro: envios.find((e) => e.erro)?.erro,
+  };
+}
+
+// =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
 const cacheToken = new Map<string, { ate: number; email: string }>();
@@ -2157,7 +2274,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v53-contas-globais',
+            versao: 'v54-recuperacao',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2538,6 +2655,24 @@ export default {
             todas: url.searchParams.get('todas') === '1',
           });
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'pendentes') {
+          const r = await db.rpc('pagamentos_pendentes', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'recuperar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await dispararRecuperacao(
+            slug, corpo.canal || 'email', corpo.ids || [], db, env,
+          );
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'historico-recuperacao') {
+          const r = await db.rpc('historico_recuperacao', { p: {} });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'contas-meta' && req.method === 'POST') {
