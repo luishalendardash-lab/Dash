@@ -40,6 +40,7 @@ interface Env {
   MANYCHAT_CAMPO?: string;
   MANYCHAT_FIELD_ID?: string;
   MANYCHAT_CAMPO_FONE?: string;
+  META_CONTAS?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -1559,9 +1560,17 @@ async function buscarCampanhasPeriodo(slug: string, db: Supabase, env: Env): Pro
   const plano = await db.rpc('campanhas_escolhidas', { p: { lancamento: slug } });
   if (plano?.ok === false) return plano;
 
-  const contas: string[] = plano?.contas || [];
+  // as contas vêm do banco; a variável do Worker é a última reserva,
+  // para o caso de alguém limpar o campo sem querer
+  let contas: string[] = plano?.contas || [];
+  if (!contas.length && env.META_CONTAS) {
+    contas = env.META_CONTAS.split(',').map((c) => c.trim()).filter(Boolean);
+  }
   if (!contas.length) {
-    return { ok: false, erro: 'nenhuma conta de anuncio configurada em Ajustes' };
+    return {
+      ok: false,
+      erro: 'nenhuma conta de anuncio configurada. Preencha em Ajustes > Contas de anuncio.',
+    };
   }
   if (!plano?.de) {
     return { ok: false, erro: 'este lancamento nao tem leads com data' };
@@ -1954,9 +1963,17 @@ async function sincronizarInvestimento(
     p: { de: opcoes.de || '', ate: opcoes.ate || '' },
   });
 
-  const contas: string[] = plano?.contas || [];
+  // as contas vêm do banco; a variável do Worker é a última reserva,
+  // para o caso de alguém limpar o campo sem querer
+  let contas: string[] = plano?.contas || [];
+  if (!contas.length && env.META_CONTAS) {
+    contas = env.META_CONTAS.split(',').map((c) => c.trim()).filter(Boolean);
+  }
   if (!contas.length) {
-    return { ok: false, erro: 'nenhuma conta de anuncio configurada em Ajustes' };
+    return {
+      ok: false,
+      erro: 'nenhuma conta de anuncio configurada. Preencha em Ajustes > Contas de anuncio.',
+    };
   }
 
   const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
@@ -2140,7 +2157,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v51-hotmart-eventos',
+            versao: 'v53-contas-globais',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2521,6 +2538,34 @@ export default {
             todas: url.searchParams.get('todas') === '1',
           });
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'contas-meta' && req.method === 'POST') {
+          const corpo = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_contas_meta', {
+            p: { contas: (corpo as any).contas || '' },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'contas-meta') {
+          const r = await db.rpc('contas_meta', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'webhooks-pendentes') {
+          const r = await db.rpc('webhooks_pendentes', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'reprocessar') {
+          const r = await db.rpc('reprocessar_vendas', {
+            p: {
+              fonte: url.searchParams.get('fonte') || '',
+              limite: Number(url.searchParams.get('limite') || 500),
+            },
+          });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'sem-investimento') {
