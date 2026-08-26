@@ -1982,56 +1982,104 @@ async function sincronizarInvestimento(
   const campanhas: any[] = [];
   const erros: string[] = [];
 
+  // Busca em dois níveis, e o motivo importa:
+  //
+  // ANÚNCIO   é o que casa com o lead, porque a UTM traz {{ad.name}}.
+  //           Mas o Meta não devolve linha de anúncio excluído — o
+  //           gasto dele some do relatório por anúncio.
+  //
+  // CAMPANHA  traz o total de verdade, incluindo o que foi gasto em
+  //           anúncio que não existe mais.
+  //
+  // Gravamos os anúncios e, no fim, a diferença de cada campanha como
+  // um registro à parte. Assim o total bate com o gerenciador e o
+  // casamento por criativo continua funcionando.
+  const totalPorCampanha = new Map<string, { nome: string; gasto: number; dia: string }>();
+  const somaDosAnuncios = new Map<string, number>();
+
   for (const conta of contas) {
-    // Nível de ANÚNCIO, não de campanha.
-    //
-    // O lead traz o nome do anúncio na UTM ({{ad.name}}), então o gasto
-    // precisa vir na mesma camada para casar. Em nível de campanha o
-    // total do lançamento fica certo, mas o CPL por criativo nunca
-    // aparece — os nomes são de coisas diferentes.
-    //
-    // O nome da campanha continua vindo junto: é dele que sai a data
-    // que decide a qual lançamento o gasto pertence.
-    const qs = new URLSearchParams({
-      level: 'ad',
-      time_range: periodo,
-      time_increment: '1',
-      fields: 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,'
-            + 'spend,impressions,clicks,date_start',
-      limit: '500',
-      access_token: env.META_TOKEN,
-    });
+    for (const nivel of ['ad', 'campaign'] as const) {
+      const campos = nivel === 'ad'
+        ? 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,'
+          + 'spend,impressions,clicks,date_start'
+        : 'campaign_id,campaign_name,spend,impressions,clicks,date_start';
 
-    let url: string | null =
-      `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
-    let paginas = 0;
+      const qs = new URLSearchParams({
+        level: nivel,
+        time_range: periodo,
+        time_increment: '1',
+        fields: campos,
+        limit: '500',
+        access_token: env.META_TOKEN,
+      });
 
-    // um ano de dados diários por anúncio passa de mil linhas
-    while (url && paginas < 80) {
-      const r = await fetch(url);
-      const d: any = await r.json().catch(() => ({}));
-      if (d.error) { erros.push(`${conta}: ${d.error.message}`); break; }
+      let url: string | null =
+        `https://graph.facebook.com/${versao}/${conta}/insights?${qs}`;
+      let paginas = 0;
 
-      for (const l of d.data || []) {
-        campanhas.push({
-          // o id do anúncio é o que casa com o meta_ad_id do lead
-          id: l.ad_id,
-          nome: l.ad_name,
-          // a data do lançamento sai do nome da campanha
-          campanha: l.campaign_name,
-          campanha_id: l.campaign_id,
-          conjunto: l.adset_name,
-          conjunto_id: l.adset_id,
-          conta,
-          gasto: l.spend,
-          impressoes: l.impressions,
-          cliques: l.clicks,
-          dia: l.date_start,
-        });
+      while (url && paginas < 120) {
+        const r = await fetch(url);
+        const d: any = await r.json().catch(() => ({}));
+        if (d.error) { erros.push(`${conta} (${nivel}): ${d.error.message}`); break; }
+
+        for (const l of d.data || []) {
+          if (nivel === 'ad') {
+            campanhas.push({
+              id: l.ad_id,
+              nome: l.ad_name,
+              campanha: l.campaign_name,
+              campanha_id: l.campaign_id,
+              conjunto: l.adset_name,
+              conjunto_id: l.adset_id,
+              conta,
+              gasto: l.spend,
+              impressoes: l.impressions,
+              cliques: l.clicks,
+              dia: l.date_start,
+            });
+
+            const chave = `${l.campaign_id}|${l.date_start}`;
+            somaDosAnuncios.set(
+              chave, (somaDosAnuncios.get(chave) || 0) + Number(l.spend || 0),
+            );
+          } else {
+            const chave = `${l.campaign_id}|${l.date_start}`;
+            totalPorCampanha.set(chave, {
+              nome: l.campaign_name,
+              gasto: Number(l.spend || 0),
+              dia: l.date_start,
+            });
+          }
+        }
+
+        url = d.paging?.next || null;
+        paginas++;
       }
-      url = d.paging?.next || null;
-      paginas++;
     }
+  }
+
+  // o que a campanha gastou e nenhum anúncio reportou
+  let resgatado = 0;
+  for (const [chave, campanha] of totalPorCampanha) {
+    const jaContado = somaDosAnuncios.get(chave) || 0;
+    const sobra = campanha.gasto - jaContado;
+
+    // centavos de arredondamento não viram registro
+    if (sobra <= 0.5) continue;
+
+    const [campanhaId, dia] = chave.split('|');
+    campanhas.push({
+      id: `resto-${campanhaId}-${dia}`,
+      nome: `${campanha.nome} · anúncios encerrados`,
+      campanha: campanha.nome,
+      campanha_id: campanhaId,
+      conta: contas[0],
+      gasto: String(sobra),
+      impressoes: '0',
+      cliques: '0',
+      dia,
+    });
+    resgatado += sobra;
   }
 
   if (!campanhas.length) {
@@ -2069,6 +2117,9 @@ async function sincronizarInvestimento(
     ...total,
     gasto: Number(total.gasto.toFixed(2)),
     linhas: campanhas.length,
+    // quanto veio de anúncio que não existe mais: se for alto, boa parte
+    // do investimento não tem como ser atribuída a criativo
+    gasto_de_anuncios_encerrados: Number(resgatado.toFixed(2)),
     periodo: { de: plano.de, ate: plano.ate },
     por_lancamento: porLanc,
     avisos: erros.length ? erros : undefined,
@@ -2290,7 +2341,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v56-gasto-por-anuncio',
+            versao: 'v59-dois-niveis',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2758,6 +2809,16 @@ export default {
         if (partes[1] === 'importar-campanhas') {
           const r = await importarCampanhasEscolhidas(slug, db, env);
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'quiz-disponivel') {
+          const r = await db.rpc('quiz_disponivel', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'gasto-meta') {
+          const r = await db.rpc('gasto_meta', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'ads-sem-gasto') {
