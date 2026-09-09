@@ -2341,7 +2341,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v59-dois-niveis',
+            versao: 'v60-modelos-quiz',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2809,6 +2809,32 @@ export default {
         if (partes[1] === 'importar-campanhas') {
           const r = await importarCampanhasEscolhidas(slug, db, env);
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'modelos-quiz') {
+          const r = await db.rpc('modelos_quiz', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'aplicar-modelo' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('aplicar_modelo_quiz', {
+            p: { lancamento: slug, modelo: corpo.modelo || '', substituir: 'sim' },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'salvar-modelo' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_modelo_quiz', {
+            p: {
+              lancamento: slug,
+              nome: corpo.nome || '',
+              descricao: corpo.descricao || '',
+              padrao: !!corpo.padrao,
+            },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'quiz-disponivel') {
