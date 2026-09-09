@@ -592,7 +592,14 @@ async function repassar(dados: any, env: Env, db: Supabase, pessoaId?: string) {
 
       // tag que não aplicou não derruba o lead, mas fica registrada:
       // sem ela o fluxo do WhatsApp pode não disparar
-      if (r.aviso_tag || r.aviso_fluxo) {
+      // Fluxo recusado por contato inativo COM a tag aplicada não é
+      // falha: é o caminho previsto funcionando. Registrar como erro
+      // enche a tela de saúde e esconde problema de verdade.
+      const fluxoEsperado = r.aviso_fluxo
+        && /not active/i.test(r.aviso_fluxo)
+        && r.tag_aplicada;
+
+      if (r.aviso_tag || (r.aviso_fluxo && !fluxoEsperado)) {
         await db.insert('webhooks_raw', {
           fonte: 'manychat_parcial',
           body: { subscriber_id: r.subscriber_id, passos: r.passos },
@@ -1808,6 +1815,7 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
   const passos: string[] = [];
   let id = '';
   let jaExistia = false;
+  let resultado_optin = true;
 
   // ---- 1. procurar antes de criar
   //
@@ -1841,11 +1849,17 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
     // Para WhatsApp o mínimo é first_name, whatsapp_phone e
     // consent_phrase. Campo vazio faz o ManyChat recusar em vez de
     // ignorar, então só mandamos o que tem valor.
+    // O opt-in é o que faz o contato nascer ativo. Sem optin_whatsapp o
+    // contato entra sem consentimento registrado, e aí nem a automação
+    // com gatilho de novo contato dispara — que é o caminho oficial:
+    // gatilho "Novo contato" com as condições "Opted-in through API" e
+    // "Opted-in for WhatsApp".
     const corpo: Record<string, any> = {
       first_name: primeiro,
       whatsapp_phone: fone,
-      consent_phrase: 'aceitou receber mensagens no formulario de inscricao',
+      optin_whatsapp: true,
       has_opt_in_sms: true,
+      consent_phrase: 'aceitou receber mensagens no formulario de inscricao',
     };
     if (ultimo) corpo.last_name = ultimo;
     if (lead.email) {
@@ -1882,7 +1896,12 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
 
   const resultado: any = {
     ok: true, subscriber_id: id, criado: !jaExistia, passos,
+    optin: resultado_optin,
   };
+
+  if (!resultado_optin) {
+    passos.push('opt-in nao confirmado: o contato pode nao receber template');
+  }
 
   // ---- 3. campo espelho com o número
   //
@@ -1937,10 +1956,20 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
 
     if (!resultado.fluxo_disparado) {
       const motivo = motivoManychat(fluxo);
-      resultado.aviso_fluxo = /not active/i.test(motivo)
-        ? `${motivo} — contato que nunca interagiu nao aceita sendFlow. `
-          + 'Use uma tag e deixe a automacao do ManyChat disparar por ela.'
-        : motivo;
+
+      if (/not active/i.test(motivo)) {
+        // Regra do ManyChat: contato que nunca respondeu está inativo e
+        // não aceita sendFlow. A saída é a tag — automação com gatilho
+        // de tag consegue enviar template para contato inativo.
+        resultado.aviso_fluxo = cfg?.tag
+          ? `${motivo} — a tag "${cfg.tag}" foi aplicada e a automacao do `
+            + 'ManyChat deve disparar por ela. Pode remover MANYCHAT_FLOW.'
+          : `${motivo} — configure MANYCHAT_TAG e crie no ManyChat uma automacao `
+            + 'com gatilho "tag aplicada". Contato criado por API nao aceita '
+            + 'sendFlow nem gatilho de novo contato.';
+      } else {
+        resultado.aviso_fluxo = motivo;
+      }
     }
     passos.push(`fluxo: ${resultado.fluxo_disparado ? 'ok' : 'falhou'}`);
   }
@@ -2341,7 +2370,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v60-modelos-quiz',
+            versao: 'v62-manychat-optin',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
