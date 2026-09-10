@@ -2370,7 +2370,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v62-manychat-optin',
+            versao: 'v63-salvar-quiz',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2690,7 +2690,11 @@ export default {
 
         if (partes[1] === 'quiz' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
-          const r = await db.rpc('salvar_quiz', { p: corpo });
+          // o lançamento vem na URL, não no corpo: sem juntar aqui, a
+          // função não acha o lançamento e recusa o salvamento inteiro
+          const r = await db.rpc('salvar_quiz', {
+            p: { ...corpo, lancamento: corpo.lancamento || slug },
+          });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
@@ -2703,7 +2707,9 @@ export default {
 
         if (partes[1] === 'alterar-codigo' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
-          const r = await db.rpc('alterar_codigo', { p: corpo });
+          const r = await db.rpc('alterar_codigo', {
+            p: { ...corpo, lancamento: corpo.lancamento || slug },
+          });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
@@ -2806,8 +2812,13 @@ export default {
 
         if (partes[1] === 'limpar-investimento' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
+          // sem lançamento no corpo, limpa o do seletor; o front manda
+          // vazio de propósito quando quer limpar tudo
           const r = await db.rpc('limpar_investimento', {
-            p: { origem: corpo.origem || 'tudo', lancamento: corpo.lancamento || '' },
+            p: {
+              origem: corpo.origem || 'tudo',
+              lancamento: corpo.lancamento === '' ? '' : (corpo.lancamento || slug),
+            },
           });
           return jsonResponse(r, 200, ch);
         }
