@@ -173,7 +173,9 @@ const s = (v: any): string | undefined => {
 
 const EMAIL_KEYS = ['email', 'e_mail', 'mail', 'lead_email', 'buyer_email', 'contact_email'];
 const FONE_KEYS = ['telefone', 'phone', 'whatsapp', 'celular', 'fone', 'phone_number',
-                   'mobile', 'lead_phone', 'buyer_phone', 'wa_id', 'numero'];
+                   'mobile', 'lead_phone', 'buyer_phone', 'wa_id', 'numero',
+                   // o SendFlow chama de "number" no evento de entrada no grupo
+                   'number'];
 const NOME_KEYS = ['nome', 'name', 'full_name', 'first_name', 'lead_name', 'buyer_name', 'nome_completo'];
 
 function extrairUtm(body: any) {
@@ -251,20 +253,50 @@ function parseQuiz(body: any, lp?: string, rawId?: number | null) {
   };
 }
 
+/**
+ * O SendFlow manda vários tipos de aviso no mesmo webhook, e só um
+ * deles diz que alguém entrou no grupo:
+ *
+ *   group.updated.members.added     entrou      → interessa
+ *   group.updated.members.removed   saiu        → interessa
+ *   campaign.message.metrics        estatística → não é pessoa
+ *   campaign.metrics                estatística → não é pessoa
+ *
+ * Os de estatística não têm telefone, e tentar processá-los gerava
+ * "sem identificador" no log — erro que escondia problema de verdade.
+ */
+function eventoDeGrupo(body: any): boolean {
+  const evento = String(body?.event || body?.evento || '').toLowerCase();
+  if (!evento) return true;                 // formato antigo, sem tipo
+  if (evento.includes('metric')) return false;
+  return /member|group|participant/.test(evento);
+}
+
 function parseSendflow(body: any, lp?: string, rawId?: number | null) {
-  const evento = (s(achar(body, ['event', 'evento', 'tipo', 'action', 'status'])) || '').toLowerCase();
+  const evento = (s(achar(body, ['event', 'evento', 'tipo', 'action', 'status'])) || '')
+    .toLowerCase();
+
+  // "removed" e "left" indicam saída; o resto é entrada
   let tipo = 'grupo_entrou';
-  if (/(sai|left|remov|exit|out)/.test(evento)) tipo = 'grupo_saiu';
+  if (/(removed|left|sai|remov|exit)/.test(evento)) tipo = 'grupo_saiu';
+
+  const d = body?.data || body;
+
   return {
     lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
     email: s(achar(body, EMAIL_KEYS)),
-    telefone: s(achar(body, FONE_KEYS)),
+    // number é o campo do SendFlow; os outros ficam de reserva
+    telefone: s(d?.number) || s(achar(body, FONE_KEYS)),
     nome: s(achar(body, NOME_KEYS)),
     tipo, fonte: 'sendflow',
-    ocorreu_em: s(achar(body, ['created_at', 'timestamp', 'data', 'date'])),
+    // createdAt vem em camelCase, que a busca por chave normalizada pega
+    ocorreu_em: s(d?.createdAt) || s(achar(body, ['created_at', 'timestamp', 'date'])),
     payload: {
-      grupo: s(achar(body, ['grupo', 'group', 'group_name', 'nome_grupo'])),
-      evento_original: evento, raw: body,
+      grupo: s(d?.groupName) || s(achar(body, ['grupo', 'group', 'group_name'])),
+      grupo_id: s(d?.groupId),
+      campanha: s(d?.campaignName),
+      evento_original: evento,
+      raw: body,
     },
     dedupe_key: rawId ? `sendflow:raw:${rawId}` : undefined,
   };
@@ -682,8 +714,21 @@ async function processar(
         break;
       case 'quiz':
         resultado = await db.rpc('ingest_quiz', { p: parseQuiz(body, lp, rawId) }); break;
-      case 'sendflow':
-        resultado = await db.rpc('ingest_evento', { p: parseSendflow(body, lp, rawId) }); break;
+      case 'sendflow': {
+        // aviso de estatística não é pessoa entrando: marcamos como
+        // processado para não virar erro na tela de saúde
+        if (!eventoDeGrupo(body)) {
+          if (rawId) {
+            await db.update('webhooks_raw', { id: `eq.${rawId}` }, {
+              processado: true,
+              erro: `ignorado: ${String(body?.event || 'evento sem pessoa')}`,
+            }, 'dash').catch(() => {});
+          }
+          return;
+        }
+        resultado = await db.rpc('ingest_evento', { p: parseSendflow(body, lp, rawId) });
+        break;
+      }
       case 'manychat':
         resultado = await db.rpc('ingest_evento', { p: parseManychat(body, lp, rawId) }); break;
       case 'hotmart':
@@ -2482,7 +2527,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v68-funil-grupo',
+            versao: 'v69-sendflow-numero',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
