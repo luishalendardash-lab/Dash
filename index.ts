@@ -5,7 +5,7 @@
  * ---- ENTRADA DE DADOS ----
  *   POST /captura              formulário próprio -> banco -> SellFlux + ManyChat
  *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow, quiz)
- *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp
+ *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp 
  *   GET  /debug/ultimos        últimos payloads crus
  *   POST /debug/reprocessar    reprocessa o que falhou
  *
