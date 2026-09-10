@@ -2482,7 +2482,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v67-redirect-grupo',
+            versao: 'v68-funil-grupo',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2930,6 +2930,26 @@ export default {
             todas: url.searchParams.get('todas') === '1',
           });
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'grupo') {
+          const r = await db.rpc('dash_grupo', { p: { lancamento: slug } });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'leads-grupo') {
+          const r = await db.rpc('leads_grupo', {
+            p: { lancamento: slug, filtro: url.searchParams.get('filtro') || '' },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'marcar-grupo' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('marcar_entrada_grupo', {
+            p: { lancamento: slug, telefones: corpo.telefones || [] },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'pendentes') {
