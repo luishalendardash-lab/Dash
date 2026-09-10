@@ -1971,25 +1971,44 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
 
   // ---- 5. tag
   //
-  // Este é o caminho que funciona para contato novo: a automação do
-  // ManyChat com gatilho "tag aplicada" consegue enviar template para
-  // contato inativo, coisa que o sendFlow da API não faz.
-  if (cfg?.tag) {
+  // A tag é o único caminho que serve para os DOIS casos:
+  //
+  //   contato novo       o gatilho "Novo contato" também funciona
+  //   contato existente  o gatilho de novo contato NUNCA dispara —
+  //                      ele já existia. Só a tag alcança essa pessoa.
+  //
+  // Por isso aplicamos sempre, mesmo sem configuração: sem tag, todo
+  // lead que já está no ManyChat entra e não recebe nada.
+  const tagUsar = cfg?.tag || 'dash-lead';
+  if (tagUsar) {
     let tag = await manychatChamar('/subscriber/addTagByName', token, {
-      subscriber_id: id, tag_name: cfg.tag,
+      subscriber_id: id, tag_name: tagUsar,
     });
 
     // addTagByName exige tag existente; na primeira vez ela não existe
     if (tag?.status !== 'success') {
-      await manychatChamar('/page/createTag', token, { name: cfg.tag });
+      await manychatChamar('/page/createTag', token, { name: tagUsar });
       tag = await manychatChamar('/subscriber/addTagByName', token, {
-        subscriber_id: id, tag_name: cfg.tag,
+        subscriber_id: id, tag_name: tagUsar,
+      });
+    }
+
+    // Contato que já existia pode ter a tag de um lançamento anterior.
+    // Remover e aplicar de novo faz o gatilho disparar outra vez — sem
+    // isso, quem já entrou no mês passado não recebe nada agora.
+    if (jaExistia && tag?.status === 'success') {
+      await manychatChamar('/subscriber/removeTagByName', token, {
+        subscriber_id: id, tag_name: tagUsar,
+      });
+      tag = await manychatChamar('/subscriber/addTagByName', token, {
+        subscriber_id: id, tag_name: tagUsar,
       });
     }
 
     resultado.tag_aplicada = tag?.status === 'success';
+    resultado.tag = tagUsar;
     if (!resultado.tag_aplicada) resultado.aviso_tag = motivoManychat(tag);
-    passos.push(`tag: ${resultado.tag_aplicada ? 'ok' : 'falhou'}`);
+    passos.push(`tag ${tagUsar}: ${resultado.tag_aplicada ? 'ok' : 'falhou'}`);
   }
 
   // ---- 6. fluxo, quando configurado
@@ -2463,7 +2482,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v65-quiz-sessao',
+            versao: 'v66-manychat-tag-sempre',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
