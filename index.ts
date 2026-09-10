@@ -42,6 +42,7 @@ interface Env {
   MANYCHAT_CAMPO_FONE?: string;
   META_CONTAS?: string;
   MANYCHAT_TAG_RECUPERACAO?: string;
+  PAGINA_QUIZ?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -743,10 +744,11 @@ async function processar(
 // recarregar. Como as perguntas vêm da API em tempo real, mexer no quiz
 // pela dash muda a página do cliente sem tocar no código dele.
 // =====================================================================
-function widgetJS(slug: string, base: string): string {
+function widgetJS(slug: string, base: string, paginaQuiz = ''): string {
   return `(function(){
   var LANC = ${JSON.stringify(slug)};
   var API  = ${JSON.stringify(base)};
+  var QUIZ_URL = ${JSON.stringify(paginaQuiz)};
   var alvo = document.getElementById('pd-captura');
   if(!alvo) { console.warn('[dash] falta <div id="pd-captura"></div>'); return; }
 
@@ -854,7 +856,22 @@ function widgetJS(slug: string, base: string): string {
   ];
 
   var inicio = Date.now();
-  var inscricaoId = null;
+  var inscricaoId = window.__pdInscricao || null;
+
+  // Na página do quiz o lead já foi capturado: não há formulário a
+  // mostrar, só as perguntas.
+  var SO_QUIZ = !!window.__pdSoQuiz;
+
+  // Endereço da página de quiz. Por padrão é a que o próprio Worker
+  // serve; um endereço próprio no lançamento substitui.
+  var PAGINA_QUIZ = (function(){
+    if(SO_QUIZ) return '';
+    try{
+      var s = document.currentScript
+              || document.querySelector('script[src*="embed.js"]');
+      return (s && s.getAttribute('data-quiz')) || QUIZ_URL || (API + '/q');
+    }catch(e){ return QUIZ_URL || (API + '/q'); }
+  })();
   var perguntas = [], visiveis = [], respostas = {}, atual = 0, grupoUrl = null;
 
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
@@ -973,6 +990,18 @@ function widgetJS(slug: string, base: string): string {
       inscricaoId = d.inscricao_id || null;
       if(typeof fbq === 'function'){ try{ fbq('track','Lead'); }catch(e){} }
       if(window.dataLayer){ try{ window.dataLayer.push({event:'lead_capturado'}); }catch(e){} }
+
+      // O quiz vai para uma página só dele: na landing ele disputa
+      // atenção com o resto do conteúdo, e o lead abandona no meio.
+      // Sem página de quiz configurada, continua na mesma tela.
+      if(PAGINA_QUIZ){
+        var destino = PAGINA_QUIZ
+          + (PAGINA_QUIZ.indexOf('?') === -1 ? '?' : '&')
+          + 'l=' + encodeURIComponent(LANC)
+          + (inscricaoId ? '&i=' + encodeURIComponent(inscricaoId) : '');
+        window.location.href = destino;
+        return;
+      }
 
       alvo.scrollIntoView({behavior:'smooth', block:'center'});
       iniciarQuiz();
@@ -1093,7 +1122,23 @@ function widgetJS(slug: string, base: string): string {
     setTimeout(function(){ try{ window.location.href = grupoUrl; }catch(e){} }, 900);
   }
 
-  telaForm();
+  // Na página do quiz o lead já foi capturado: mostrar o formulário de
+  // novo faria ele preencher duas vezes e criaria lead duplicado.
+  if(SO_QUIZ){
+    if(inscricaoId){
+      iniciarQuiz();
+    } else {
+      // chegou na página sem passar pela captura
+      pinta(
+        '<div class="pd-fim"><div class="pd-emoji">👋</div>'
+        + '<h3>Comece pela inscrição</h3>'
+        + '<p>Preencha o formulário na página de inscrição para responder '
+        + 'as perguntas.</p></div>'
+      );
+    }
+  } else {
+    telaForm();
+  }
 })();`;
 }
 
@@ -2288,6 +2333,54 @@ async function dispararRecuperacao(
   };
 }
 
+
+// =====================================================================
+// PÁGINA DO QUIZ — /q?i=<inscricao>&l=<lancamento>
+//
+// O Worker serve a página inteira. Três motivos para não usar um
+// arquivo separado no Pages:
+//
+//   não há endereço para configurar nem para errar
+//   quem abre sem ter preenchido o formulário não vê pergunta nenhuma
+//   o visual acompanha o que está salvo no lançamento, sem novo deploy
+// =====================================================================
+function paginaQuiz(slug: string, inscricao: string, base: string): string {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Falta pouco</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#0B0A0A;
+    background-image:radial-gradient(circle at 20% 0%, #1C1A19 0%, transparent 60%);
+    color:#fff;font-family:Jost,system-ui,sans-serif;min-height:100vh;
+    display:flex;align-items:center;justify-content:center;padding:22px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .caixa{width:100%;max-width:520px}
+  #pd-captura{width:100%}
+</style>
+</head>
+<body>
+  <div class="caixa"><div id="pd-captura"></div></div>
+  <script>
+    // a página já sabe quem é o lead: o widget pula a captura e vai
+    // direto para as perguntas
+    window.__pdInscricao = ${JSON.stringify(inscricao)};
+    window.__pdSoQuiz = true;
+  <\/script>
+  <script src="${base}/embed.js?l=${encodeURIComponent(slug)}"><\/script>
+</body>
+</html>`;
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -2370,7 +2463,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v63-salvar-quiz',
+            versao: 'v65-quiz-sessao',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2537,10 +2630,32 @@ export default {
         return jsonResponse({ ok: true, reprocessados: ok, falharam: falhou }, 200, ch);
       }
 
+      // ============ PÁGINA DO QUIZ ============
+      if (partes[0] === 'q') {
+        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
+        const inscricao = url.searchParams.get('i') || '';
+        return new Response(paginaQuiz(slug, inscricao, url.origin), {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+
       // ============ WIDGET DA LP ============
       if (partes[0] === 'embed.js') {
         const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
-        return new Response(widgetJS(slug, url.origin), {
+
+        // a página de quiz é configurada por lançamento; sem ela o quiz
+        // continua acontecendo dentro da landing
+        const lancEmbed = await db.select('lancamentos',
+          { select: 'config', slug: `eq.${slug}`, limit: '1' });
+        const paginaQuiz = url.searchParams.get('quiz')
+          || lancEmbed?.[0]?.config?.pagina_quiz
+          || env.PAGINA_QUIZ
+          || '';
+
+        return new Response(widgetJS(slug, url.origin, paginaQuiz), {
           headers: {
             'Content-Type': 'application/javascript; charset=utf-8',
             // curto: o cliente não precisa limpar cache ao mexer no quiz
@@ -2556,9 +2671,30 @@ export default {
         const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO;
         const lanc = await db.select('lancamentos',
           { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' });
-        const destino = lanc?.[0]?.config?.grupo_url;
-        if (!destino) return new Response('Grupo indisponível no momento.', { status: 404 });
-        if (inscricaoId) {
+        let destino = lanc?.[0]?.config?.grupo_url;
+
+        if (!destino) {
+          return new Response(
+            'O link do grupo não está cadastrado neste lançamento. '
+            + 'Configure em Quiz > Para onde o lead vai ao terminar.',
+            { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+          );
+        }
+
+        // link colado sem https quebra o redirect com erro genérico
+        destino = String(destino).trim();
+        if (!/^https?:\/\//i.test(destino)) destino = `https://${destino}`;
+
+        try {
+          new URL(destino);
+        } catch {
+          return new Response(
+            `O link cadastrado não é um endereço válido: ${destino}`,
+            { status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+          );
+        }
+
+        if (inscricaoId && inscricaoId !== 'undefined') {
           ctx.waitUntil(db.rpc('ingest_evento', {
             p: { inscricao_id: inscricaoId, tipo: 'grupo_click', fonte: 'interno',
                  lancamento: lanc[0].slug, payload: {} },
@@ -2593,10 +2729,13 @@ export default {
         });
         if (r?.ok === false) return jsonResponse(r, 400, ch);
 
-        // devolve o link do grupo já rastreado
+        // O link do grupo passa por uma rota nossa para registrar o
+        // clique. Sem inscricao_id o parâmetro virava "undefined" e a
+        // rota respondia erro — melhor mandar sem ele do que quebrar.
         const slug = s(corpo?.lancamento) || env.LANCAMENTO_PADRAO || '';
         const link = `${url.origin}/r/grupo/publico`
-                   + `?l=${encodeURIComponent(slug)}&i=${r.inscricao_id}`;
+                   + `?l=${encodeURIComponent(slug)}`
+                   + (r?.inscricao_id ? `&i=${r.inscricao_id}` : '');
         return jsonResponse({ ...r, grupo_url: link }, 200, ch);
       }
 
@@ -2695,6 +2834,16 @@ export default {
           const r = await db.rpc('salvar_quiz', {
             p: { ...corpo, lancamento: corpo.lancamento || slug },
           });
+
+          // a página do quiz vive no mesmo formulário, mas em outra
+          // função: salvar as duas juntas evita um botão a mais na tela
+          if (corpo.pagina_quiz !== undefined) {
+            await db.rpc('salvar_pagina_quiz', {
+              p: { lancamento: corpo.lancamento || slug,
+                   pagina_quiz: corpo.pagina_quiz },
+            }).catch(() => {});
+          }
+
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
