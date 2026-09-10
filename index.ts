@@ -2482,7 +2482,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v66-manychat-tag-sempre',
+            versao: 'v67-redirect-grupo',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2596,7 +2596,12 @@ export default {
       }
 
       // ---------------- REDIRECT PRO GRUPO
-      if (partes[0] === 'r' && partes[1] === 'grupo') {
+      //
+      // Duas formas convivem: /r/grupo/<segredo> é a antiga, usada em
+      // links já espalhados; /r/grupo/publico é a que o quiz monta, e
+      // ela é tratada logo abaixo. Sem esta exceção, a rota antiga
+      // compara "publico" com o segredo e devolve 403.
+      if (partes[0] === 'r' && partes[1] === 'grupo' && partes[2] !== 'publico') {
         if ((partes[2] || '') !== env.WEBHOOK_SECRET) {
           return new Response('Link inválido.', { status: 403 });
         }
