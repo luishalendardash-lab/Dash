@@ -7,7 +7,14 @@
   },
   "vars": {
     "LANCAMENTO_PADRAO": "lanc-2026-09",
-    "META_API_VERSAO": "v25.0"
+    "META_API_VERSAO": "v25.0",
+    // Endereço público do bucket das imagens do e-mail.
+    // Com domínio próprio:  https://img.seudominio.com.br
+    // Com o domínio do R2:  https://pub-xxxxxxxx.r2.dev
+    "R2_PUBLICO": "",
+    // Id da conta onde o bucket vive e nome do bucket
+    "R2_ACCOUNT_ID": "",
+    "R2_BUCKET": "dash-imagens"
   },
   "triggers": {
     "crons": ["17 * * * *"]
@@ -22,4 +29,9 @@
   //
   // Opcionais (da para configurar pela tela de Integracoes):
   //   HOTMART_HOTTOK  SELLFLUX_ENDPOINT  MANYCHAT_WEBHOOK  TMB_TOKEN
+  //
+  // Upload de imagem do gerador de e-mail (tipo Secret):
+  //   R2_ACCESS_KEY_ID      token de API do R2
+  //   R2_SECRET_ACCESS_KEY  segredo do mesmo token
+  //   (o bucket pode estar em outra conta Cloudflare — veja R2-IMAGENS.md)
 }

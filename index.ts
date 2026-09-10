@@ -43,6 +43,11 @@ interface Env {
   META_CONTAS?: string;
   MANYCHAT_TAG_RECUPERACAO?: string;
   PAGINA_QUIZ?: string;
+  R2_PUBLICO?: string;
+  R2_ACCOUNT_ID?: string;
+  R2_BUCKET?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -2445,6 +2450,216 @@ function paginaQuiz(slug: string, inscricao: string, base: string): string {
 </html>`;
 }
 
+
+// =====================================================================
+// UPLOAD DE IMAGEM PARA O R2
+//
+// O binding direto do R2 só funciona quando o bucket está na mesma
+// conta Cloudflare do Worker. Como o bucket vive em outra conta,
+// falamos com ele pela API S3, que é aberta a qualquer um com as
+// credenciais certas.
+//
+// Isso exige assinar cada requisição no formato AWS SigV4 — não há
+// biblioteca disponível no Worker, então a assinatura é feita aqui com
+// as funções de criptografia que o próprio ambiente oferece.
+// =====================================================================
+
+const TIPOS_IMAGEM: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
+const LIMITE_IMAGEM = 5 * 1024 * 1024;   // 5 MB
+
+/** Bytes em hexadecimal minúsculo, como o SigV4 exige. */
+function paraHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function sha256Hex(dados: ArrayBuffer | string): Promise<string> {
+  const bytes = typeof dados === 'string' ? new TextEncoder().encode(dados) : dados;
+  return paraHex(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+async function hmac(chave: ArrayBuffer | Uint8Array, msg: string): Promise<ArrayBuffer> {
+  const k = await crypto.subtle.importKey(
+    'raw', chave as any, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  return crypto.subtle.sign('HMAC', k, new TextEncoder().encode(msg));
+}
+
+/**
+ * Assina e envia um PUT para o endpoint S3 do R2.
+ *
+ * A ordem dos passos importa: qualquer diferença de espaço, maiúscula
+ * ou ordem de cabeçalho produz assinatura diferente e o R2 recusa com
+ * SignatureDoesNotMatch, sem dizer onde está o erro.
+ */
+async function enviarParaR2(
+  env: Env, caminho: string, corpo: ArrayBuffer, tipo: string,
+): Promise<{ ok: boolean; erro?: string; status?: number }> {
+  const conta = (env.R2_ACCOUNT_ID || '').trim();
+  const bucket = (env.R2_BUCKET || '').trim();
+  const chaveId = (env.R2_ACCESS_KEY_ID || '').trim();
+  const segredo = (env.R2_SECRET_ACCESS_KEY || '').trim();
+
+  const host = `${conta}.r2.cloudflarestorage.com`;
+  const url = `https://${host}/${bucket}/${caminho}`;
+
+  const agora = new Date();
+  const dataHora = agora.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const dia = dataHora.slice(0, 8);
+  const escopo = `${dia}/auto/s3/aws4_request`;
+
+  const hashCorpo = await sha256Hex(corpo);
+
+  // os cabeçalhos assinados vão em ordem alfabética, em minúsculas
+  const cabecalhos: Record<string, string> = {
+    'content-type': tipo,
+    host,
+    'x-amz-content-sha256': hashCorpo,
+    'x-amz-date': dataHora,
+  };
+
+  const nomes = Object.keys(cabecalhos).sort();
+  const canonicos = nomes.map((n) => `${n}:${cabecalhos[n]}\n`).join('');
+  const assinados = nomes.join(';');
+
+  // cada segmento do caminho é codificado, mas as barras permanecem
+  const caminhoCanonico = `/${bucket}/${caminho}`
+    .split('/')
+    .map((p) => encodeURIComponent(p))
+    .join('/');
+
+  const requisicaoCanonica = [
+    'PUT', caminhoCanonico, '', canonicos, assinados, hashCorpo,
+  ].join('\n');
+
+  const paraAssinar = [
+    'AWS4-HMAC-SHA256',
+    dataHora,
+    escopo,
+    await sha256Hex(requisicaoCanonica),
+  ].join('\n');
+
+  // a chave é derivada em quatro etapas encadeadas
+  const kData = await hmac(new TextEncoder().encode(`AWS4${segredo}`), dia);
+  const kRegiao = await hmac(kData, 'auto');
+  const kServico = await hmac(kRegiao, 's3');
+  const kAssinatura = await hmac(kServico, 'aws4_request');
+  const assinatura = paraHex(await hmac(kAssinatura, paraAssinar));
+
+  const auth = `AWS4-HMAC-SHA256 Credential=${chaveId}/${escopo}, `
+             + `SignedHeaders=${assinados}, Signature=${assinatura}`;
+
+  try {
+    const r = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: auth,
+        'Content-Type': tipo,
+        'x-amz-content-sha256': hashCorpo,
+        'x-amz-date': dataHora,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      },
+      body: corpo,
+    });
+
+    if (r.ok) return { ok: true, status: r.status };
+
+    const texto = await r.text().catch(() => '');
+    // o R2 devolve XML; a mensagem interessa mais que a tag
+    const msg = (texto.match(/<Message>([^<]+)<\/Message>/) || [])[1] || texto.slice(0, 200);
+    return { ok: false, status: r.status, erro: msg || `http ${r.status}` };
+
+  } catch (e: any) {
+    return { ok: false, erro: String(e?.message || e) };
+  }
+}
+
+async function subirImagem(req: Request, env: Env, ch: Record<string, string>) {
+  const faltando = [
+    !env.R2_ACCOUNT_ID && 'R2_ACCOUNT_ID',
+    !env.R2_BUCKET && 'R2_BUCKET',
+    !env.R2_ACCESS_KEY_ID && 'R2_ACCESS_KEY_ID',
+    !env.R2_SECRET_ACCESS_KEY && 'R2_SECRET_ACCESS_KEY',
+    !env.R2_PUBLICO && 'R2_PUBLICO',
+  ].filter(Boolean);
+
+  if (faltando.length) {
+    return jsonResponse({
+      ok: false,
+      erro: `faltam variaveis no Worker: ${faltando.join(', ')}. `
+          + 'Veja R2-IMAGENS.md para onde pegar cada uma.',
+    }, 400, ch);
+  }
+
+  const form = await req.formData().catch(() => null);
+  const arquivo = form?.get('arquivo');
+
+  if (!arquivo || typeof arquivo === 'string') {
+    return jsonResponse({ ok: false, erro: 'nenhum arquivo recebido' }, 400, ch);
+  }
+
+  const tipo = (arquivo as File).type || '';
+  const ext = TIPOS_IMAGEM[tipo];
+  if (!ext) {
+    return jsonResponse({
+      ok: false,
+      erro: `tipo ${tipo || 'desconhecido'} nao aceito. Use JPG, PNG, GIF ou WEBP.`,
+    }, 400, ch);
+  }
+
+  const bytes = await (arquivo as File).arrayBuffer();
+
+  if (bytes.byteLength > LIMITE_IMAGEM) {
+    return jsonResponse({
+      ok: false,
+      erro: `a imagem tem ${(bytes.byteLength / 1048576).toFixed(1)} MB e o limite e 5 MB. `
+          + 'Imagem pesada demora a carregar e alguns clientes cortam o e-mail.',
+    }, 400, ch);
+  }
+
+  // nome com data e sorteio: nome repetido sobrescreveria uma imagem
+  // que já está num e-mail enviado
+  const hoje = new Date().toISOString().slice(0, 10);
+  const aleatorio = crypto.randomUUID().slice(0, 8);
+  const limpo = String((arquivo as File).name || 'imagem')
+    .toLowerCase()
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'imagem';
+
+  const caminho = `email/${hoje}/${limpo}-${aleatorio}.${ext}`;
+
+  const r = await enviarParaR2(env, caminho, bytes, tipo);
+
+  if (!r.ok) {
+    const dica = r.status === 403
+      ? ' — verifique se o token do R2 tem permissao de escrita neste bucket'
+      : '';
+    return jsonResponse({
+      ok: false, erro: `${r.erro}${dica}`, status: r.status,
+    }, 502, ch);
+  }
+
+  const base = (env.R2_PUBLICO || '').replace(/\/+$/, '');
+
+  return jsonResponse({
+    ok: true,
+    url: `${base}/${caminho}`,
+    caminho,
+    tamanho: bytes.byteLength,
+    tipo,
+  }, 200, ch);
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -2527,7 +2742,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v69-sendflow-numero',
+            versao: 'v71-r2-outra-conta',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -2975,6 +3190,10 @@ export default {
             todas: url.searchParams.get('todas') === '1',
           });
           return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'upload' && req.method === 'POST') {
+          return await subirImagem(req, env, ch);
         }
 
         if (partes[1] === 'grupo') {
