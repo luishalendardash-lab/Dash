@@ -5,7 +5,7 @@
  * ---- ENTRADA DE DADOS ----
  *   POST /captura              formulário próprio -> banco -> SellFlux + ManyChat
  *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow, quiz)
- *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp 
+ *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp
  *   GET  /debug/ultimos        últimos payloads crus
  *   POST /debug/reprocessar    reprocessa o que falhou
  *
@@ -327,41 +327,151 @@ function parseManychat(body: any, lp?: string, rawId?: number | null) {
   };
 }
 
+// O status pode chegar de dois jeitos: purchase.status na v2 ("APPROVED")
+// ou o nome do evento na v1 ("PURCHASE_APPROVED"). Os dois estão aqui.
 const STATUS_HOTMART: Record<string, string> = {
-  approved: 'aprovada', complete: 'aprovada',
-  purchase_approved: 'aprovada', purchase_complete: 'aprovada',
-  waiting_payment: 'pendente', purchase_billet_printed: 'pendente',
-  printed_billet: 'pendente', purchase_protest: 'pendente',
-  canceled: 'cancelada', purchase_canceled: 'cancelada', expired: 'cancelada',
-  refunded: 'reembolsada', purchase_refunded: 'reembolsada',
-  chargeback: 'chargeback', purchase_chargeback: 'chargeback',
+  approved: 'aprovada',
+  complete: 'aprovada',
+  completed: 'aprovada',
+  paid: 'aprovada',
+  purchase_approved: 'aprovada',
+  purchase_complete: 'aprovada',
+
+  waiting_payment: 'pendente',
+  started: 'pendente',
+  under_analisys: 'pendente',
+  under_analysis: 'pendente',
+  overdue: 'pendente',
+  printed_billet: 'pendente',
+  billet_printed: 'pendente',
+  purchase_billet_printed: 'pendente',
+  purchase_delayed: 'pendente',
+
+  canceled: 'cancelada',
+  cancelled: 'cancelada',
+  expired: 'cancelada',
+  blocked: 'cancelada',
+  purchase_canceled: 'cancelada',
+  purchase_expired: 'cancelada',
+  purchase_out_of_shopping_cart: 'cancelada',
+
+  refunded: 'reembolsada',
+  purchase_refunded: 'reembolsada',
+
+  chargeback: 'chargeback',
+  protested: 'chargeback',
+  purchase_protest: 'chargeback',
+  purchase_chargeback: 'chargeback',
 };
 
+/**
+ * A Hotmart v2 aninha tudo em objetos, e a busca genérica por nome de
+ * chave encontra a coisa errada:
+ *
+ *   price      é { value, currency_value } — a busca ignora objeto e
+ *              devolve undefined, então o valor virava zero
+ *   name       existe em buyer E em product — a busca achava o do
+ *              comprador primeiro e gravava como nome do produto
+ *   event      "PURCHASE_APPROVED" era lido como status, que não bate
+ *              com nenhuma chave conhecida, e tudo virava "pendente"
+ *
+ * Por isso este parser lê caminhos explícitos. A busca genérica fica de
+ * reserva, para o formato antigo (v1) que ainda pode chegar.
+ */
 function parseHotmart(body: any, lp?: string, rawId?: number | null) {
-  const bruto = (s(achar(body, ['status', 'event', 'evento', 'transaction_status'])) || '').toLowerCase();
-  const valor = Number(achar(body, ['full_price', 'price', 'valor', 'total', 'amount']) ?? 0) || 0;
-  const metodoBruto = (s(achar(body, ['payment_type', 'metodo', 'payment_method'])) || '').toLowerCase();
+  const d = body?.data || {};
+  const compra = d.purchase || {};
+  const comprador = d.buyer || d.user || {};
+  const produto = d.product || {};
+
+  // o status da compra, não o nome do evento
+  // purchase.status na v2, status solto na v1, nome do evento por último
+  const bruto = String(
+    compra.status
+    || d.status
+    || body?.status
+    || s(achar(body, ['transaction_status']))
+    || body?.event
+    || '',
+  ).toLowerCase();
+
+  // o valor vive em price.value; full_price é o preço cheio antes de
+  // desconto, e serve de reserva
+  // na v2 o preço é objeto; na v1 é número solto
+  const valor =
+    Number(compra.price?.value)
+    || Number(compra.full_price?.value)
+    || Number(compra.original_offer_price?.value)
+    || Number(typeof body?.price === 'number' ? body.price : NaN)
+    || Number(typeof body?.full_price === 'number' ? body.full_price : NaN)
+    || Number(achar(body, ['valor', 'total', 'amount']) ?? 0)
+    || 0;
+
+  // o que sobra para o produtor depois das comissões
+  const comissoes = Array.isArray(d.commissions) ? d.commissions : [];
+  const doProdutor = comissoes.find((c: any) =>
+    String(c?.source || '').toUpperCase() === 'PRODUCER');
+  const liquido =
+    Number(doProdutor?.value)
+    || Number(comissoes[0]?.value)
+    || Number(achar(body, ['producer_value']) ?? 0)
+    || 0;
+
+  const metodoBruto = String(
+    compra.payment?.type || compra.payment_type
+    || s(achar(body, ['payment_method', 'metodo'])) || '',
+  ).toLowerCase();
+
   const metodo = /pix/.test(metodoBruto) ? 'pix'
-               : /(billet|boleto)/.test(metodoBruto) ? 'boleto'
+               : /(billet|boleto|bank_slip)/.test(metodoBruto) ? 'boleto'
                : /(credit|card|cartao)/.test(metodoBruto) ? 'cartao'
                : metodoBruto || undefined;
+
+  const fone = comprador.checkout_phone?.number
+            || comprador.phone
+            || s(achar(comprador, FONE_KEYS));
+
   return {
     lancamento: s(achar(body, ['lancamento', 'launch'])) || lp,
     plataforma: 'hotmart',
-    transacao_id: s(achar(body, ['transaction', 'transaction_id', 'transacao', 'order_id']))
+
+    transacao_id: s(compra.transaction || d.transaction
+                    || achar(body, ['transaction_id', 'order_id']))
                   || (rawId ? `raw-${rawId}` : `sem-id-${Date.now()}`),
-    produto: s(achar(body, ['product_name', 'prod_name', 'produto', 'name'])),
-    oferta: s(achar(body, ['offer', 'oferta', 'off', 'offer_code'])),
-    status: STATUS_HOTMART[bruto] || 'pendente',
+
+    // do objeto product, nunca do buyer
+    produto: s(produto.name || produto.product_name
+               || achar(body, ['prod_name', 'produto'])),
+    produto_id: s(produto.id || produto.ucode),
+
+    oferta: s(compra.offer?.code || compra.offer?.key
+              || achar(body, ['offer_code', 'oferta'])),
+
+    status: STATUS_HOTMART[bruto] || (/(approv|complet|paid)/.test(bruto)
+      ? 'aprovada' : 'pendente'),
+
     metodo,
-    parcelas: s(achar(body, ['installments_number', 'parcelas', 'installments'])),
+    parcelas: s(compra.payment?.installments_number
+                || achar(body, ['installments_number', 'parcelas'])),
+
     valor_bruto: valor,
-    valor_liquido: Number(achar(body, ['producer_value', 'commission']) ?? 0) || 0,
-    moeda: s(achar(body, ['currency', 'currency_code', 'moeda'])) || 'BRL',
-    email: s(achar(body, EMAIL_KEYS)),
-    telefone: s(achar(body, FONE_KEYS)),
-    src: s(achar(body, ['src', 'sck', 'source'])),
-    ocorreu_em: s(achar(body, ['purchase_date', 'order_date', 'creation_date', 'timestamp'])),
+    valor_liquido: liquido,
+    moeda: s(compra.price?.currency_value || compra.full_price?.currency_value
+             || achar(body, ['currency', 'currency_code'])) || 'BRL',
+
+    nome: s(comprador.name || achar(comprador, NOME_KEYS)),
+    email: s(comprador.email || achar(comprador, EMAIL_KEYS)),
+    telefone: s(fone),
+
+    src: s(compra.sckPaymentLink || compra.sck
+           || achar(body, ['src', 'source'])),
+
+    // approved_date é quando o dinheiro entrou; order_date é quando o
+    // pedido foi feito. Para faturamento vale o primeiro.
+    ocorreu_em: s(compra.approved_date || compra.order_date
+                  || body?.creation_date
+                  || achar(body, ['purchase_date', 'timestamp'])),
+
     raw: body,
   };
 }
@@ -2742,7 +2852,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v71-r2-outra-conta',
+            versao: 'v72-hotmart-v2',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
