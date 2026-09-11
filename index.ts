@@ -3240,7 +3240,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v82-inscricao-manda',
+            versao: 'v83-modelos-email',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3742,6 +3742,19 @@ export default {
 
         if (partes[1] === 'lancamentos-com-leads') {
           const r = await db.rpc('lancamentos_com_leads', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'modelos-email' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = url.searchParams.get('apagar') === '1'
+            ? await db.rpc('apagar_modelo_email', { p: corpo })
+            : await db.rpc('salvar_modelo_email', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'modelos-email') {
+          const r = await db.rpc('modelos_email', { p: {} });
           return jsonResponse(r, 200, ch);
         }
 
