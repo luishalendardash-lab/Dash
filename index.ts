@@ -49,6 +49,9 @@ interface Env {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   SELLFLUX_REATIVACAO?: string;
+  META_PIXEL_ID?: string;
+  META_CAPI_TOKEN?: string;
+  META_TEST_EVENT?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -2907,6 +2910,192 @@ async function enviarReativacao(
   };
 }
 
+
+// =====================================================================
+// CONVERSIONS API DO META
+//
+// Manda o evento quando o lead se qualifica no quiz, não quando só
+// preenche o formulário. O algoritmo passa a procurar quem se parece
+// com quem se qualificou — que é o público que interessa.
+//
+// Três exigências do Meta que não são óbvias:
+//
+//   os dados pessoais vão em SHA-256, nunca em texto
+//   e-mail e telefone precisam ser normalizados ANTES do hash, senão
+//   o mesmo lead gera hashes diferentes e a correspondência falha
+//   o event_id é o que evita contar duas vezes quando o pixel do
+//   navegador também dispara
+// =====================================================================
+
+/** SHA-256 em hexadecimal, como o Meta exige. */
+async function hashMeta(valor: string): Promise<string> {
+  const bytes = new TextEncoder().encode(valor);
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * Normaliza antes do hash. O Meta compara hashes, então qualquer
+ * diferença de espaço ou maiúscula faz o mesmo lead virar outra pessoa
+ * e a correspondência simplesmente não acontece — sem erro nenhum.
+ */
+async function dadosMeta(campo: string, valor: string | null | undefined) {
+  const v = String(valor || '').trim();
+  if (!v) return undefined;
+
+  let limpo = v.toLowerCase();
+
+  if (campo === 'ph') {
+    // só dígitos, com DDI e sem o +
+    limpo = v.replace(/\D/g, '');
+    if (!limpo) return undefined;
+    if (!limpo.startsWith('55')) limpo = `55${limpo}`;
+  }
+
+  if (campo === 'fn' || campo === 'ln') {
+    limpo = limpo.replace(/[^a-zà-ú]/g, '');
+    if (!limpo) return undefined;
+  }
+
+  return hashMeta(limpo);
+}
+
+async function enviarEventosMeta(
+  inscricaoId: string, db: Supabase, env: Env, extras: any = {},
+): Promise<any> {
+  // A configuração vive na tela de Integrações, não em variável do
+  // Worker: quem troca o pixel é o cliente, e ele não tem acesso ao
+  // Cloudflare. As variáveis ficam de reserva.
+  const cfg = await db.rpc('config_meta_capi', { p: {} }).catch(() => null);
+
+  if (cfg && cfg.ativa === false && !env.META_PIXEL_ID) {
+    return { ok: true, enviados: 0, aviso: 'integracao do Meta desativada' };
+  }
+
+  const pixel = String(cfg?.pixel_id || env.META_PIXEL_ID || '').trim();
+  const token = String(
+    cfg?.token || env.META_CAPI_TOKEN || env.META_TOKEN || '',
+  ).trim();
+  const testEvent = String(cfg?.test_event || env.META_TEST_EVENT || '').trim();
+
+  if (!pixel || !token) {
+    return {
+      ok: false,
+      erro: 'configure o pixel e o token em Integracoes > Meta',
+    };
+  }
+
+  const plano = await db.rpc('eventos_meta_do_lead', {
+    p: { inscricao_id: inscricaoId },
+  });
+
+  const eventos: any[] = plano?.eventos || [];
+  if (!eventos.length) return { ok: true, enviados: 0 };
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  let enviados = 0;
+  let falhas = 0;
+  let primeiroErro: string | undefined;
+
+  for (const ev of eventos) {
+    try {
+      const user: Record<string, any> = {};
+
+      const em = await dadosMeta('em', ev.email);
+      if (em) user.em = [em];
+
+      const ph = await dadosMeta('ph', ev.telefone);
+      if (ph) user.ph = [ph];
+
+      if (ev.nome) {
+        const partes = String(ev.nome).trim().split(/\s+/);
+        const fn = await dadosMeta('fn', partes[0]);
+        if (fn) user.fn = [fn];
+        if (partes.length > 1) {
+          const ln = await dadosMeta('ln', partes[partes.length - 1]);
+          if (ln) user.ln = [ln];
+        }
+      }
+
+      // fbc e fbp melhoram muito a correspondência: eles ligam o evento
+      // ao clique no anúncio, sem depender de e-mail
+      if (ev.fbclid) {
+        // o formato exigido é fb.1.<timestamp>.<fbclid>
+        user.fbc = String(ev.fbclid).startsWith('fb.')
+          ? ev.fbclid
+          : `fb.1.${(ev.quando || Math.floor(Date.now() / 1000)) * 1000}.${ev.fbclid}`;
+      }
+      if (ev.fbp) user.fbp = ev.fbp;
+      if (ev.ip) user.client_ip_address = ev.ip;
+      if (ev.user_agent) user.client_user_agent = ev.user_agent;
+
+      // sem nada que identifique a pessoa, o Meta recusa o evento
+      if (!Object.keys(user).length) {
+        falhas++;
+        primeiroErro ||= 'lead sem e-mail, telefone ou fbclid';
+        continue;
+      }
+
+      const corpo = {
+        data: [{
+          event_name: ev.evento,
+          event_time: ev.quando || Math.floor(Date.now() / 1000),
+          event_id: ev.event_id,
+          action_source: 'website',
+          event_source_url: ev.landing_url || undefined,
+          user_data: user,
+          // qualifying_group é o parâmetro que acompanha o
+          // QualifiedLead: diz em que etapa a qualificação aconteceu
+          custom_data: (ev.valor || ev.grupo)
+            ? {
+                ...(ev.valor
+                  ? { value: Number(ev.valor), currency: 'BRL' }
+                  : {}),
+                ...(ev.grupo ? { qualifying_group: ev.grupo } : {}),
+              }
+            : undefined,
+        }],
+        ...(testEvent ? { test_event_code: testEvent } : {}),
+      };
+
+      const r = await fetch(
+        `https://graph.facebook.com/${versao}/${pixel}/events?access_token=${token}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(corpo),
+        },
+      );
+
+      const resposta: any = await r.json().catch(() => ({}));
+      const deuCerto = r.ok && !resposta?.error;
+
+      if (deuCerto) enviados++; else falhas++;
+      if (!deuCerto) {
+        primeiroErro ||= resposta?.error?.message || `http ${r.status}`;
+      }
+
+      await db.rpc('registrar_evento_meta', {
+        p: {
+          inscricao_id: inscricaoId,
+          evento: ev.evento,
+          event_id: ev.event_id,
+          resultado: deuCerto ? 'enviado' : 'falhou',
+          erro: deuCerto ? null : String(primeiroErro).slice(0, 300),
+        },
+      }).catch(() => {});
+
+    } catch (e: any) {
+      falhas++;
+      primeiroErro ||= String(e?.message || e);
+    }
+  }
+
+  return { ok: true, enviados, falhas, erro: primeiroErro };
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -2989,7 +3178,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v77-endpoint-fixo',
+            versao: 'v79-meta-integracao',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3260,6 +3449,15 @@ export default {
         });
         if (r?.ok === false) return jsonResponse(r, 400, ch);
 
+        // O evento do Meta sai aqui: é agora que sabemos se o lead se
+        // qualificou. Vai em segundo plano — o lead não pode esperar a
+        // resposta do Meta para ser mandado ao grupo.
+        if (r?.inscricao_id) {
+          ctx.waitUntil(
+            enviarEventosMeta(String(r.inscricao_id), db, env).catch(() => {}),
+          );
+        }
+
         // O link do grupo passa por uma rota nossa para registrar o
         // clique. Sem inscricao_id o parâmetro virava "undefined" e a
         // rota respondia erro — melhor mandar sem ele do que quebrar.
@@ -3446,6 +3644,25 @@ export default {
         if (partes[1] === 'lancamentos-com-leads') {
           const r = await db.rpc('lancamentos_com_leads', { p: {} });
           return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'eventos-meta' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_eventos_meta', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'eventos-meta') {
+          const r = await db.rpc('config_eventos_meta', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'testar-evento-meta' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await enviarEventosMeta(
+            String(corpo.inscricao_id || ''), db, env,
+          );
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
         }
 
         if (partes[1] === 'opcoes-segmentacao' && req.method === 'POST') {
