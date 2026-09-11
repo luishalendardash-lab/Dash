@@ -48,6 +48,7 @@ interface Env {
   R2_BUCKET?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
+  SELLFLUX_REATIVACAO?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -2782,25 +2783,22 @@ async function subirImagem(req: Request, env: Env, ch: Record<string, string>) {
 // Cada lote registra quem foi antes de seguir, então parar no meio e
 // retomar não manda duas vezes para ninguém.
 // =====================================================================
+/** Automação de reativação no SellFlux. Trocável por SELLFLUX_REATIVACAO. */
+const SELLFLUX_REATIVACAO_PADRAO =
+  'https://webhook.sellflux.app/v2/webhook/form_game/d576e8b8ae89eb7625f0ba0e6414320f';
+
 async function enviarReativacao(
   corpo: any, db: Supabase, env: Env,
 ): Promise<any> {
-  // Cada automação do SellFlux tem a sua própria URL de entrada. Usar a
-  // da captação jogaria os reativados no fluxo de lead novo do
-  // lançamento em andamento — que é justamente o que não queremos.
-  let url = String(corpo.endpoint || '').trim();
-
-  if (!url) {
-    const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
-    url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT || '';
-  }
-
-  if (!url) {
-    return {
-      ok: false,
-      erro: 'informe a URL da automacao de reativacao no SellFlux',
-    };
-  }
+  // A automação de reativação tem URL própria, diferente da captação:
+  // usar a da captação jogaria estes leads no fluxo de lead novo do
+  // lançamento em andamento.
+  //
+  // Fica aqui porque não muda de campanha para campanha. Para trocar
+  // sem mexer no código, basta criar SELLFLUX_REATIVACAO no Worker.
+  let url = String(corpo.endpoint || '').trim()
+    || env.SELLFLUX_REATIVACAO
+    || SELLFLUX_REATIVACAO_PADRAO;
 
   if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 
@@ -2991,7 +2989,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v76-segmentacao',
+            versao: 'v77-endpoint-fixo',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,

@@ -30,6 +30,9 @@
   // Opcionais (da para configurar pela tela de Integracoes):
   //   HOTMART_HOTTOK  SELLFLUX_ENDPOINT  MANYCHAT_WEBHOOK  TMB_TOKEN
   //
+  // Reativacao de leads: a URL da automacao ja vem no codigo.
+  // Crie SELLFLUX_REATIVACAO (tipo Text) so se quiser trocar sem deploy.
+  //
   // Upload de imagem do gerador de e-mail (tipo Secret):
   //   R2_ACCESS_KEY_ID      token de API do R2
   //   R2_SECRET_ACCESS_KEY  segredo do mesmo token
