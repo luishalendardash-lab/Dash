@@ -2770,6 +2770,145 @@ async function subirImagem(req: Request, env: Env, ch: Record<string, string>) {
   }, 200, ch);
 }
 
+
+// =====================================================================
+// REATIVAÇÃO DE LEADS
+//
+// Manda a base de lançamentos anteriores para uma automação do
+// SellFlux. O envio vai em lotes porque a base pode ter milhares de
+// pessoas e o Worker tem limite de tempo por requisição — a tela chama
+// esta rota repetidamente até a fila acabar.
+//
+// Cada lote registra quem foi antes de seguir, então parar no meio e
+// retomar não manda duas vezes para ninguém.
+// =====================================================================
+async function enviarReativacao(
+  corpo: any, db: Supabase, env: Env,
+): Promise<any> {
+  // Cada automação do SellFlux tem a sua própria URL de entrada. Usar a
+  // da captação jogaria os reativados no fluxo de lead novo do
+  // lançamento em andamento — que é justamente o que não queremos.
+  let url = String(corpo.endpoint || '').trim();
+
+  if (!url) {
+    const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
+    url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT || '';
+  }
+
+  if (!url) {
+    return {
+      ok: false,
+      erro: 'informe a URL da automacao de reativacao no SellFlux',
+    };
+  }
+
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+
+  const campanha = String(corpo.campanha || '').trim();
+  if (!campanha) return { ok: false, erro: 'de um nome a campanha' };
+
+  const plano = await db.rpc('lote_reativacao', {
+    p: {
+      campanha,
+      lancamentos: corpo.lancamentos || [],
+      pergunta: corpo.pergunta || '',
+      respostas: corpo.respostas || [],
+      excluir_produtos: corpo.excluir_produtos || [],
+      excluir_lancamento_atual: corpo.excluir_lancamento_atual !== false,
+      limite: Number(corpo.limite || 200),
+    },
+  });
+
+  const leads: any[] = plano?.leads || [];
+  if (!leads.length) {
+    return { ok: true, enviados: 0, falhas: 0, acabou: true };
+  }
+
+  const envios: any[] = [];
+  let enviados = 0;
+  let falhas = 0;
+
+  for (const l of leads) {
+    try {
+      // O webhook do SellFlux espera JSON, no mesmo formato que o
+      // script de captura dele envia: telefone completo com DDI em
+      // "phone", e os campos extras soltos no corpo.
+      const digitos = String(l.telefone || '').replace(/\D/g, '');
+      const comDdi = digitos
+        ? (digitos.startsWith('55') ? `+${digitos}` : `+55${digitos}`)
+        : '';
+
+      const dados: Record<string, any> = {
+        name: l.nome || '',
+        email: l.email || '',
+        phone: comDdi,
+        phoneWithDdi: comDdi,
+        countryCode: '55',
+        // a tag separa esta campanha das outras: a automação do
+        // SellFlux dispara por ela
+        tag: campanha,
+        origem_lancamento: l.lancamento || '',
+        engenheiro: l.engenheiro ? 'sim' : 'nao',
+        // a resposta do quiz vai junto: permite ramificar a automação
+        // sem precisar de uma campanha por perfil
+        perfil: l.resposta || '',
+        source: 'dash_reativacao',
+        timestamp: new Date().toISOString(),
+      };
+
+      let r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json;charset=UTF-8' },
+        body: JSON.stringify(dados),
+      });
+
+      // endpoint antigo pode só aceitar formulário: tentamos uma vez
+      // assim antes de dar a pessoa como perdida
+      if (!r.ok && (r.status === 400 || r.status === 415)) {
+        r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(
+            Object.fromEntries(
+              Object.entries(dados).map(([k, v]) => [k, String(v)]),
+            ),
+          ).toString(),
+        });
+      }
+
+      const deuCerto = r.ok;
+      if (deuCerto) enviados++; else falhas++;
+
+      envios.push({
+        pessoa_id: l.pessoa_id, inscricao_id: l.inscricao_id, canal: 'email',
+        resultado: deuCerto ? 'enviado' : 'falhou',
+        erro: deuCerto ? null : `http ${r.status}`,
+      });
+
+    } catch (e: any) {
+      falhas++;
+      envios.push({
+        pessoa_id: l.pessoa_id, inscricao_id: l.inscricao_id, canal: 'email',
+        resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
+      });
+    }
+  }
+
+  // registra antes de devolver: se a tela parar aqui, o próximo lote
+  // não repete quem já foi
+  await db.rpc('registrar_reativacao', { p: { campanha, envios } }).catch(() => {});
+
+  return {
+    ok: true,
+    enviados,
+    falhas,
+    lote: leads.length,
+    // menos que o limite significa que a fila acabou
+    acabou: leads.length < Number(corpo.limite || 200),
+    primeiro_erro: envios.find((e) => e.erro)?.erro,
+  };
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -2852,7 +2991,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v72-hotmart-v2',
+            versao: 'v76-segmentacao',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3304,6 +3443,34 @@ export default {
 
         if (partes[1] === 'upload' && req.method === 'POST') {
           return await subirImagem(req, env, ch);
+        }
+
+        if (partes[1] === 'lancamentos-com-leads') {
+          const r = await db.rpc('lancamentos_com_leads', { p: {} });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'opcoes-segmentacao' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('opcoes_segmentacao', { p: corpo });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'previa-reativacao' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('previa_reativacao', { p: corpo });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'reativar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await enviarReativacao(corpo, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'historico-reativacao') {
+          const r = await db.rpc('historico_reativacao', { p: {} });
+          return jsonResponse(r, 200, ch);
         }
 
         if (partes[1] === 'grupo') {
