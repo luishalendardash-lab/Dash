@@ -813,7 +813,10 @@ async function processar(
 ) {
   try {
     let resultado: any;
-    const lp = lancamento || env.LANCAMENTO_PADRAO;
+    // Webhook de lead novo: não existe inscrição ainda, então o ativo
+    // é o melhor palpite disponível. Se houver dois ativos, o mais
+    // recente vence — por isso encerrar o lançamento anterior importa.
+    const lp = lancamento || await slugAtivo(db, env);
     switch (fonte) {
       case 'sellflux':
       case 'teste':
@@ -1629,7 +1632,9 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
     try {
       await db.rpc('ingest_venda', {
         p: {
-          lancamento: env.LANCAMENTO_PADRAO,
+          // a TMB não diz o lançamento; a venda entra no ativo e pode
+          // ser movida depois em Ajustes se cair no lugar errado
+          lancamento: await slugAtivo(db, env),
           plataforma: 'tmb',
           transacao_id: String(p.pedido_id ?? ''),
           produto: p.lancamento || p.produto_nome || null,
@@ -3096,6 +3101,63 @@ async function enviarEventosMeta(
   return { ok: true, enviados, falhas, erro: primeiroErro };
 }
 
+
+/**
+ * O slug do lançamento ativo, perguntado ao banco.
+ *
+ * Antes isso vinha de LANCAMENTO_PADRAO, uma variável do Worker que
+ * precisava ser trocada a cada lançamento. Esquecer dela fazia o lead
+ * terminar o quiz e cair num "grupo não cadastrado" — e a rotina mensal
+ * já tem passos demais para incluir mais um.
+ *
+ * O resultado fica em memória por alguns minutos: a rota é chamada a
+ * cada lead e o lançamento ativo não muda de um minuto para o outro.
+ */
+/**
+ * O lançamento de uma inscrição.
+ *
+ * Sempre que existe inscrição, ela é quem manda: o lead pertence ao
+ * lançamento em que se inscreveu, e não ao que está ativo agora. Com
+ * dois lançamentos ativos ao mesmo tempo — o que acontece na virada —
+ * usar "o ativo" entrega o quiz e o grupo errados.
+ */
+async function slugDaInscricao(
+  inscricaoId: string | null | undefined, db: Supabase,
+): Promise<string> {
+  if (!inscricaoId || inscricaoId === 'undefined') return '';
+
+  try {
+    const dono = await db.select('inscricoes', {
+      select: 'lancamento_id', id: `eq.${inscricaoId}`, limit: '1',
+    });
+    const lancId = dono?.[0]?.lancamento_id;
+    if (!lancId) return '';
+
+    const l = await db.select('lancamentos', {
+      select: 'slug', id: `eq.${lancId}`, limit: '1',
+    });
+    return l?.[0]?.slug || '';
+  } catch {
+    return '';
+  }
+}
+
+let cacheAtivo: { slug: string; ate: number } | null = null;
+
+async function slugAtivo(db: Supabase, env: Env): Promise<string> {
+  if (cacheAtivo && cacheAtivo.ate > Date.now()) return cacheAtivo.slug;
+
+  try {
+    const r = await db.rpc('lancamento_ativo', { p: {} });
+    if (r?.slug) {
+      cacheAtivo = { slug: r.slug, ate: Date.now() + 120000 };
+      return r.slug;
+    }
+  } catch { /* cai para a variável abaixo */ }
+
+  return env.LANCAMENTO_PADRAO || '';
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -3178,7 +3240,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v79-meta-integracao',
+            versao: 'v82-inscricao-manda',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3210,7 +3272,7 @@ export default {
 
         const { utm, meta, fbclid, landing_url } = extrairUtm(body);
         const dados = {
-          lancamento: s(body?.lancamento) || env.LANCAMENTO_PADRAO,
+          lancamento: s(body?.lancamento) || await slugAtivo(db, env),
           email, telefone,
           nome: s(achar(body, NOME_KEYS)),
           origem: 'form_proprio',
@@ -3302,7 +3364,7 @@ export default {
           return new Response('Link inválido.', { status: 403 });
         }
         const inscricaoId = url.searchParams.get('i');
-        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO;
+        const slug = url.searchParams.get('l') || await slugAtivo(db, env);
 
         const lanc = await db.select('lancamentos',
           { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' }, 'dash');
@@ -3352,8 +3414,11 @@ export default {
 
       // ============ PÁGINA DO QUIZ ============
       if (partes[0] === 'q') {
-        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
         const inscricao = url.searchParams.get('i') || '';
+        // a inscrição decide de qual lançamento é este quiz
+        const slug = await slugDaInscricao(inscricao, db)
+          || url.searchParams.get('l')
+          || await slugAtivo(db, env);
         return new Response(paginaQuiz(slug, inscricao, url.origin), {
           headers: {
             'Content-Type': 'text/html; charset=utf-8',
@@ -3364,7 +3429,7 @@ export default {
 
       // ============ WIDGET DA LP ============
       if (partes[0] === 'embed.js') {
-        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
+        const slug = url.searchParams.get('l') || await slugAtivo(db, env);
 
         // a página de quiz é configurada por lançamento; sem ela o quiz
         // continua acontecendo dentro da landing
@@ -3388,9 +3453,33 @@ export default {
       // link do grupo sem expor o segredo do webhook na landing
       if (partes[0] === 'r' && partes[1] === 'grupo' && partes[2] === 'publico') {
         const inscricaoId = url.searchParams.get('i');
-        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO;
-        const lanc = await db.select('lancamentos',
-          { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' });
+        let lanc: any = null;
+
+        // A inscrição decide. O grupo é do lançamento em que a pessoa
+        // se inscreveu, e nenhum outro — o slug na URL pode estar
+        // errado, e "o ativo" é chute quando há mais de um.
+        if (inscricaoId && inscricaoId !== 'undefined') {
+          const dono = await db.select('inscricoes', {
+            select: 'lancamento_id', id: `eq.${inscricaoId}`, limit: '1',
+          }).catch(() => null);
+
+          const lancId = dono?.[0]?.lancamento_id;
+          if (lancId) {
+            lanc = await db.select('lancamentos', {
+              select: 'id,slug,config', id: `eq.${lancId}`, limit: '1',
+            }).catch(() => null);
+          }
+        }
+
+        // sem inscrição, resta o slug da URL
+        if (!lanc?.[0]) {
+          const slug = url.searchParams.get('l');
+          if (slug) {
+            lanc = await db.select('lancamentos',
+              { select: 'id,slug,config', slug: `eq.${slug}`, limit: '1' });
+          }
+        }
+
         let destino = lanc?.[0]?.config?.grupo_url;
 
         if (!destino) {
@@ -3425,7 +3514,10 @@ export default {
 
       // ============ QUIZ (público — o lead responde) ============
       if (partes[0] === 'quiz' && req.method === 'GET') {
-        const slug = url.searchParams.get('l') || env.LANCAMENTO_PADRAO || '';
+        // as perguntas são as do lançamento do lead, não as do ativo
+        const slug = await slugDaInscricao(url.searchParams.get('i'), db)
+          || url.searchParams.get('l')
+          || await slugAtivo(db, env);
         const r = await db.rpc('quiz_publico', { p: { lancamento: slug } });
         return jsonResponse(r, r?.ok === false ? 404 : 200, ch);
       }
@@ -3438,12 +3530,17 @@ export default {
           return jsonResponse({ ok: true, recebido: true }, 200, ch);
         }
 
+        // O lançamento vem da inscrição, não do "lançamento ativo".
+        // O quiz é configurado por lançamento: se o lead entrou no X,
+        // as perguntas, o grupo e a atribuição são do X — mesmo que
+        // outro lançamento tenha começado enquanto ele respondia, e
+        // mesmo com dois ativos ao mesmo tempo.
         const r = await db.rpc('responder_quiz', {
           p: {
             inscricao_id: s(corpo?.inscricao_id),
             email: s(corpo?.email),
             telefone: s(corpo?.telefone),
-            lancamento: s(corpo?.lancamento) || env.LANCAMENTO_PADRAO,
+            lancamento: s(corpo?.lancamento),
             respostas: corpo?.respostas || {},
           },
         });
@@ -3461,7 +3558,9 @@ export default {
         // O link do grupo passa por uma rota nossa para registrar o
         // clique. Sem inscricao_id o parâmetro virava "undefined" e a
         // rota respondia erro — melhor mandar sem ele do que quebrar.
-        const slug = s(corpo?.lancamento) || env.LANCAMENTO_PADRAO || '';
+        // O link leva a inscrição; a rota do grupo resolve o lançamento
+        // a partir dela. O slug vai junto só para o registro do clique.
+        const slug = s(corpo?.lancamento) || '';
         const link = `${url.origin}/r/grupo/publico`
                    + `?l=${encodeURIComponent(slug)}`
                    + (r?.inscricao_id ? `&i=${r.inscricao_id}` : '');
@@ -3483,7 +3582,7 @@ export default {
         if (url.searchParams.get('token') !== env.DEBUG_TOKEN) {
           return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
         }
-        const slug = url.searchParams.get('lancamento') || env.LANCAMENTO_PADRAO || '';
+        const slug = url.searchParams.get('lancamento') || await slugAtivo(db, env);
         const dias = Math.min(90, Number(url.searchParams.get('dias') || 30));
         const r = await sincronizarMeta(slug, dias, db, env);
         return jsonResponse(r, r.ok ? 200 : 400, ch);

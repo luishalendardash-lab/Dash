@@ -6,7 +6,9 @@
     "enabled": true
   },
   "vars": {
-    "LANCAMENTO_PADRAO": "lanc-2026-09",
+    // Reserva apenas: a dash pergunta ao banco qual lancamento esta
+    // ativo. So e usada se o banco nao responder.
+    "LANCAMENTO_PADRAO": "",
     "META_API_VERSAO": "v25.0",
     // Endereço público do bucket das imagens do e-mail.
     // Com domínio próprio:  https://img.seudominio.com.br
