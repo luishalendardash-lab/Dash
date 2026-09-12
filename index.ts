@@ -1087,6 +1087,24 @@ function widgetJS(slug: string, base: string, paginaQuiz = ''): string {
 
       // Brasil tem dois formatos: fixo (10 dígitos) e celular (11)
       if(ddi.value === '55'){
+        // O celular preenche sozinho com o número completo, incluindo o
+        // 55 do país. Cortar em 11 dígitos direto come os dois últimos
+        // do número — o lead entra no grupo com um telefone e fica
+        // salvo com outro, e nunca mais casa.
+        //
+        // 13 dígitos começando com 55 é DDI + DDD + 9 dígitos: o 55 sai.
+        if(d.length === 13 && d.slice(0,2) === '55'){
+          d = d.slice(2);
+        } else if(d.length === 12 && d.slice(0,2) === '55'){
+          // 12 dígitos com 55 na frente é DDI + DDD + 8 dígitos.
+          //
+          // O 55 também é DDD (Santa Maria), então "555599887766" pode
+          // ser DDI+DDD 55 ou DDD 55 + 10 dígitos. Doze dígitos não
+          // cabem num número brasileiro sem DDI, então o primeiro 55
+          // é sempre o país.
+          d = d.slice(2);
+        }
+
         d = d.slice(0, 11);
         molde = d.length <= 10 ? '(00) 0000-0000' : '(00) 00000-0000';
       }
@@ -3492,7 +3510,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v86-push-rotas',
+            versao: 'v87-telefone-ddi',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
