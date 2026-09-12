@@ -5,6 +5,20 @@ Versão do Worker no fim disto: **v48-manychat-busca**
 Confira em `https://dash.luishalendardash.workers.dev/health` — se aparecer
 `"versao": "v48-manychat-busca"`, o backend está atualizado.
 
+
+## Sobre o deploy do backend
+
+O `wrangler.jsonc` **não tem mais a seção `vars`**. Ela era a causa
+das variáveis serem apagadas a cada deploy: o Cloudflare trata o arquivo
+como a verdade e substitui todas as variáveis do tipo Text pelo que está
+nele — e o que estava lá era vazio.
+
+Sem a seção, o deploy não mexe nas variáveis. Os Secrets nunca foram
+afetados, só os Text.
+
+Se você configurar uma variável nova pelo painel, ela fica. Não
+acrescente `vars` ao arquivo.
+
 ---
 
 ## 1. SQLs no Supabase

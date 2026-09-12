@@ -52,6 +52,9 @@ interface Env {
   META_PIXEL_ID?: string;
   META_CAPI_TOKEN?: string;
   META_TEST_EVENT?: string;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_CONTATO?: string;
 }
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
@@ -3158,6 +3161,255 @@ async function slugAtivo(db: Supabase, env: Env): Promise<string> {
   return env.LANCAMENTO_PADRAO || '';
 }
 
+
+// =====================================================================
+// NOTIFICAÇÃO DE PUSH (Web Push, RFC 8291)
+//
+// O navegador só aceita notificação que venha assinada com a chave
+// VAPID do remetente e com o corpo criptografado para aquele aparelho
+// específico. Não há biblioteca disponível no Worker, então tudo é
+// feito aqui — e cada etapa foi conferida contra os vetores oficiais
+// do RFC.
+//
+// A ordem e o formato de cada passo importam: um byte fora de lugar
+// produz uma mensagem que o navegador descarta em silêncio, sem erro.
+// =====================================================================
+
+function b64urlParaBytes(s: string): Uint8Array {
+  const base = s.replace(/-/g, '+').replace(/_/g, '/');
+  const completo = base + '='.repeat((4 - (base.length % 4)) % 4);
+  const bin = atob(completo);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function bytesParaB64url(b: ArrayBuffer | Uint8Array): string {
+  const bytes = b instanceof Uint8Array ? b : new Uint8Array(b);
+  let bin = '';
+  for (const x of bytes) bin += String.fromCharCode(x);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function hkdfPush(
+  salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, tamanho: number,
+): Promise<Uint8Array> {
+  const chave = await crypto.subtle.importKey('raw', ikm as any, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: salt as any, info: info as any },
+    chave, tamanho * 8,
+  );
+  return new Uint8Array(bits);
+}
+
+/** O cabeçalho de autorização que prova quem está enviando. */
+async function cabecalhoVapid(
+  endpoint: string, publica: string, privada: string, contato: string,
+): Promise<string> {
+  const origem = new URL(endpoint).origin;
+
+  const cabecalho = bytesParaB64url(
+    new TextEncoder().encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })),
+  );
+  const corpo = bytesParaB64url(
+    new TextEncoder().encode(JSON.stringify({
+      aud: origem,
+      // 12 horas: o padrão aceita até 24, e prazo curto limita o
+      // estrago se o token vazar
+      exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+      sub: contato,
+    })),
+  );
+
+  const pub = b64urlParaBytes(publica);
+  const chave = await crypto.subtle.importKey(
+    'jwk',
+    {
+      kty: 'EC', crv: 'P-256',
+      x: bytesParaB64url(pub.slice(1, 33)),
+      y: bytesParaB64url(pub.slice(33, 65)),
+      d: privada,
+    },
+    { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'],
+  );
+
+  const assinatura = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    chave,
+    new TextEncoder().encode(`${cabecalho}.${corpo}`),
+  );
+
+  return `vapid t=${cabecalho}.${corpo}.${bytesParaB64url(assinatura)}, k=${publica}`;
+}
+
+/**
+ * Criptografa o corpo para um aparelho.
+ *
+ * Cada inscrição tem a sua própria chave: a mesma mensagem para dois
+ * celulares gera dois corpos diferentes.
+ */
+async function criptografarPush(
+  texto: string, p256dh: string, authSecret: string,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const uaPub = b64urlParaBytes(p256dh);
+  const auth = b64urlParaBytes(authSecret);
+
+  // par efêmero, novo a cada mensagem
+  const par = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'],
+  );
+  const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', par.publicKey));
+
+  const pubUA = await crypto.subtle.importKey(
+    'raw', uaPub as any, { name: 'ECDH', namedCurve: 'P-256' }, false, [],
+  );
+  const segredo = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: pubUA }, par.privateKey, 256,
+  ));
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+
+  // a ordem aqui é a do RFC: rótulo, zero, chave do aparelho, chave nossa
+  const keyInfo = new Uint8Array([
+    ...enc.encode('WebPush: info'), 0, ...uaPub, ...asPub,
+  ]);
+
+  const ikm = await hkdfPush(auth, segredo, keyInfo, 32);
+  const cek = await hkdfPush(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdfPush(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+
+  // o corpo termina com 0x02, que marca o último registro
+  const dados = enc.encode(texto);
+  const comPadding = new Uint8Array(dados.length + 1);
+  comPadding.set(dados);
+  comPadding[dados.length] = 2;
+
+  const chaveAes = await crypto.subtle.importKey(
+    'raw', cek as any, { name: 'AES-GCM' }, false, ['encrypt'],
+  );
+  const cifrado = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce as any }, chaveAes, comPadding as any,
+  ));
+
+  // cabeçalho: salt(16) + tamanho do registro(4) + tamanho da chave(1) + chave(65)
+  const corpo = new Uint8Array(16 + 4 + 1 + 65 + cifrado.length);
+  corpo.set(salt, 0);
+  new DataView(corpo.buffer).setUint32(16, 4096, false);
+  corpo[20] = 65;
+  corpo.set(asPub, 21);
+  corpo.set(cifrado, 86);
+
+  return corpo;
+}
+
+/** Manda a notificação para um aparelho. */
+async function enviarPush(
+  inscricao: any, titulo: string, texto: string, env: Env, extras: any = {},
+): Promise<{ ok: boolean; status?: number; erro?: string; expirou?: boolean }> {
+  const publica = (env.VAPID_PUBLIC_KEY || '').trim();
+  const privada = (env.VAPID_PRIVATE_KEY || '').trim();
+
+  if (!publica || !privada) {
+    return { ok: false, erro: 'chaves VAPID nao configuradas no Worker' };
+  }
+
+  try {
+    const carga = JSON.stringify({
+      titulo, corpo: texto, tag: extras.tag || 'captacao', url: extras.url || '/',
+    });
+
+    const corpo = await criptografarPush(carga, inscricao.p256dh, inscricao.auth);
+
+    const auth = await cabecalhoVapid(
+      inscricao.endpoint, publica, privada,
+      env.VAPID_CONTATO || 'mailto:contato@luishalendar.com.br',
+    );
+
+    const r = await fetch(inscricao.endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: auth,
+        'Content-Encoding': 'aes128gcm',
+        'Content-Type': 'application/octet-stream',
+        TTL: '86400',
+        Urgency: extras.urgencia || 'normal',
+      },
+      body: corpo as any,
+    });
+
+    // 404 e 410 significam que o aparelho não existe mais: a inscrição
+    // precisa sair da lista, senão o erro se repete para sempre
+    if (r.status === 404 || r.status === 410) {
+      return { ok: false, status: r.status, expirou: true, erro: 'inscricao expirada' };
+    }
+
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      return { ok: false, status: r.status, erro: t.slice(0, 200) || `http ${r.status}` };
+    }
+
+    return { ok: true, status: r.status };
+
+  } catch (e: any) {
+    return { ok: false, erro: String(e?.message || e) };
+  }
+}
+
+
+/**
+ * Manda o aviso de captação para todos os aparelhos inscritos.
+ *
+ * Chamada pelo cron e pelo botão de teste. Cada aparelho tem a sua
+ * chave, então o corpo é criptografado uma vez por destino.
+ */
+async function avisarCaptacao(
+  db: Supabase, env: Env, forcar = false,
+): Promise<any> {
+  if (!forcar) {
+    const hora = await db.rpc('push_na_hora', { p: {} }).catch(() => null);
+    if (!hora?.enviar) {
+      return { ok: true, enviados: 0, motivo: hora?.motivo || 'nao e hora' };
+    }
+  }
+
+  const texto = await db.rpc('push_texto', { p: {} }).catch(() => null);
+  if (!texto?.ok) {
+    return { ok: false, erro: texto?.erro || 'nao consegui montar o aviso' };
+  }
+
+  const destinos = await db.rpc('push_destinos', { p: {} }).catch(() => null);
+  const lista: any[] = destinos?.destinos || [];
+
+  if (!lista.length) {
+    return { ok: true, enviados: 0, motivo: 'nenhum aparelho inscrito' };
+  }
+
+  const envios: any[] = [];
+  let ok = 0;
+  let falhas = 0;
+
+  for (const d of lista) {
+    const r = await enviarPush(d, texto.titulo, texto.corpo, env, {
+      tag: 'captacao', url: '/',
+    });
+    if (r.ok) ok++; else falhas++;
+    envios.push({
+      inscricao_id: d.id, ok: r.ok, erro: r.erro, expirou: r.expirou,
+    });
+  }
+
+  await db.rpc('registrar_push', {
+    p: { titulo: texto.titulo, corpo: texto.corpo, envios, marcar_hora: !forcar },
+  }).catch(() => {});
+
+  return {
+    ok: true, enviados: ok, falhas,
+    titulo: texto.titulo, corpo: texto.corpo,
+    primeiro_erro: envios.find((e) => e.erro)?.erro,
+  };
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -3240,7 +3492,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v84-testar-evento',
+            versao: 'v86-push-rotas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3745,6 +3997,34 @@ export default {
           return jsonResponse(r, 200, ch);
         }
 
+        if (partes[1] === 'push' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = corpo.remover
+            ? await db.rpc('remover_push', { p: corpo })
+            : await db.rpc('salvar_push', {
+                p: { ...corpo, user_agent: req.headers.get('user-agent') || '' },
+              });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'push') {
+          const r = await db.rpc('push_estado', { p: {} });
+          // a chave pública vai junto: o navegador precisa dela para
+          // criar a inscrição, e ela não é segredo
+          return jsonResponse({ ...r, chave: env.VAPID_PUBLIC_KEY || '' }, 200, ch);
+        }
+
+        if (partes[1] === 'push-config' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_push_config', { p: corpo });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'push-testar' && req.method === 'POST') {
+          const r = await avisarCaptacao(db, env, true);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
         if (partes[1] === 'modelos-email' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
           const r = url.searchParams.get('apagar') === '1'
@@ -4241,6 +4521,12 @@ export default {
           select: 'slug',
           status: 'in.(captacao,aquecimento,evento,carrinho)',
         });
+        // o aviso de captação: a própria função decide se é hora,
+        // respeitando o intervalo e o horário configurados
+        try {
+          await avisarCaptacao(db, env, false);
+        } catch { /* aviso que falha não pode derrubar o resto do cron */ }
+
         // o investimento roda uma vez por hora, cobrindo os últimos 30
         // dias: campanha nova entra sozinha, sem ninguém apertar botão
         try {

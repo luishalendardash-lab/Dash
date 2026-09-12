@@ -5,38 +5,56 @@
   "observability": {
     "enabled": true
   },
-  "vars": {
-    // Reserva apenas: a dash pergunta ao banco qual lancamento esta
-    // ativo. So e usada se o banco nao responder.
-    "LANCAMENTO_PADRAO": "",
-    "META_API_VERSAO": "v25.0",
-    // Endereço público do bucket das imagens do e-mail.
-    // Com domínio próprio:  https://img.seudominio.com.br
-    // Com o domínio do R2:  https://pub-xxxxxxxx.r2.dev
-    "R2_PUBLICO": "",
-    // Id da conta onde o bucket vive e nome do bucket
-    "R2_ACCOUNT_ID": "",
-    "R2_BUCKET": "dash-imagens"
-  },
   "triggers": {
     "crons": ["17 * * * *"]
   }
-  // SECRETS (Settings > Variables and Secrets, tipo Secret)
+
+  // ===================================================================
+  // POR QUE NAO EXISTE "vars" AQUI
+  //
+  // O Cloudflare trata este arquivo como a verdade: no deploy, ele
+  // substitui TODAS as variaveis do tipo Text pelo que esta escrito
+  // aqui. Variavel que exista no painel e nao aqui e apagada.
+  //
+  // Como as variaveis foram configuradas na tela (endereco do R2, id da
+  // conta, lancamento padrao), manter "vars" no arquivo zerava os
+  // valores a cada deploy. Sem a secao, o deploy nao mexe neles.
+  //
+  // Secrets nunca sao afetados por isto — so os Text.
+  // ===================================================================
+
+  // -------------------------------------------------------------------
+  // O QUE CONFIGURAR NO PAINEL
+  //   Workers > dash > Settings > Variables and Secrets
+  //
+  // SECRETS (obrigatorios)
   //   SUPABASE_URL          https://xxxx.supabase.co
   //   SUPABASE_SERVICE_KEY  service_role  (nunca no front)
   //   SUPABASE_ANON_KEY     anon / public
   //   WEBHOOK_SECRET        segredo que vai na URL dos webhooks
   //   DEBUG_TOKEN           segredo das rotas /debug e /sync
-  //   META_TOKEN            token de usuario do sistema do Business Manager
+  //   META_TOKEN            token do Business Manager, para ler gastos
   //
-  // Opcionais (da para configurar pela tela de Integracoes):
-  //   HOTMART_HOTTOK  SELLFLUX_ENDPOINT  MANYCHAT_WEBHOOK  TMB_TOKEN
+  // TEXT
+  //   META_API_VERSAO       v25.0
+  //   R2_PUBLICO            https://pub-xxxxxxxx.r2.dev
+  //   R2_ACCOUNT_ID         id da conta onde o bucket vive
+  //   R2_BUCKET             dash-imagens
+  //   LANCAMENTO_PADRAO     reserva; a dash pergunta ao banco qual esta ativo
   //
-  // Reativacao de leads: a URL da automacao ja vem no codigo.
-  // Crie SELLFLUX_REATIVACAO (tipo Text) so se quiser trocar sem deploy.
-  //
-  // Upload de imagem do gerador de e-mail (tipo Secret):
+  // Upload de imagem do gerador de e-mail (Secret)
   //   R2_ACCESS_KEY_ID      token de API do R2
   //   R2_SECRET_ACCESS_KEY  segredo do mesmo token
-  //   (o bucket pode estar em outra conta Cloudflare — veja R2-IMAGENS.md)
+  //   veja R2-IMAGENS.md
+  //
+  // Notificacoes de push
+  //   VAPID_PRIVATE_KEY     Secret
+  //   VAPID_PUBLIC_KEY      Text
+  //   VAPID_CONTATO         Text, mailto:seu@email.com
+  //   veja PUSH.md
+  //
+  // Configuraveis pela tela de Integracoes, sem precisar de variavel:
+  //   pixel e token do Meta, endpoint do SellFlux, token da TMB,
+  //   webhook do ManyChat
+  // -------------------------------------------------------------------
 }
