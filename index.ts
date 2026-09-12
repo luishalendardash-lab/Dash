@@ -3240,7 +3240,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v83-modelos-email',
+            versao: 'v84-testar-evento',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -3771,10 +3771,33 @@ export default {
 
         if (partes[1] === 'testar-evento-meta' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
-          const r = await enviarEventosMeta(
-            String(corpo.inscricao_id || ''), db, env,
-          );
-          return jsonResponse(r, r.ok ? 200 : 400, ch);
+
+          // Sem inscrição escolhida, usa o último lead que respondeu o
+          // quiz: é o que a pessoa quer testar na prática, e procurar o
+          // id na mão só atrasa.
+          let insc = String(corpo.inscricao_id || '').trim();
+
+          if (!insc) {
+            const ultimo = await db.rpc('ultimo_lead_do_quiz', { p: {} })
+              .catch(() => null);
+            insc = ultimo?.inscricao_id || '';
+            if (!insc) {
+              return jsonResponse({
+                ok: false,
+                erro: 'nenhum lead respondeu o quiz ainda. '
+                    + 'Faça um lead de teste primeiro.',
+              }, 400, ch);
+            }
+          }
+
+          // reenviar de propósito: o registro anterior não pode barrar
+          if (corpo.forcar) {
+            await db.rpc('limpar_envio_meta', { p: { inscricao_id: insc } })
+              .catch(() => {});
+          }
+
+          const r = await enviarEventosMeta(insc, db, env);
+          return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
         }
 
         if (partes[1] === 'opcoes-segmentacao' && req.method === 'POST') {
