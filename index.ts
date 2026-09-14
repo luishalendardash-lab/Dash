@@ -1560,6 +1560,12 @@ async function sincronizarMeta(slug: string, dias: number, db: Supabase, env: En
 
   return {
     ok: erros.length < contas.length,   // falha só se TODAS as contas falharem
+    // O erro em singular é o que o cron grava. Sem ele, 95 falhas
+    // foram registradas como "undefined" — o que não diz nada e
+    // esconde justamente o motivo de o gasto não estar chegando.
+    erro: erros.length >= contas.length
+      ? erros.map((e: any) => typeof e === 'string' ? e : JSON.stringify(e)).join(' | ')
+      : undefined,
     codigo: codigo || '(sem codigo — rode o 08_codigo_lancamento.sql)',
     limpeza: purga ? {
       entidades_removidas: purga.entidades_removidas,
@@ -2102,7 +2108,35 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
       corpo.has_opt_in_email = true;
     }
 
-    const criado = await manychatChamar('/subscriber/createSubscriber', token, corpo);
+    let criado = await manychatChamar('/subscriber/createSubscriber', token, corpo);
+
+    // "This WhatsApp ID already exists" acontece quando o contato foi
+    // criado entre a nossa busca e a criação — ou quando ele existe com
+    // um formato de número que a busca não encontrou.
+    //
+    // Não é erro: o contato está lá. Buscar de novo e seguir custa uma
+    // chamada e salva o lead, que senão nunca entra no fluxo.
+    const jaExiste = JSON.stringify(criado?.details || criado?.message || '')
+      .includes('already exists');
+
+    if (!criado?.data?.id && jaExiste) {
+      const achado = await manychatChamar(
+        '/subscriber/findBySystemField', token, { phone: fone }, 'GET',
+      ).catch(() => null);
+
+      if (achado?.data?.id) {
+        criado = achado;
+      } else {
+        // o ManyChat às vezes guarda sem o nono dígito
+        const semNono = fone.replace(/^(\d{4})9(\d{8})$/, '$1$2');
+        if (semNono !== fone) {
+          const outro = await manychatChamar(
+            '/subscriber/findBySystemField', token, { phone: semNono }, 'GET',
+          ).catch(() => null);
+          if (outro?.data?.id) criado = outro;
+        }
+      }
+    }
 
     if (criado?.data?.id) {
       id = String(criado.data.id);
@@ -2114,6 +2148,20 @@ async function enviarManychat(lead: any, cfg: any): Promise<any> {
       // dados. Sem o suporte liberar, nenhum ajuste de payload resolve —
       // por isso a mensagem diz o que fazer.
       const bloqueado = /permission denied|import/i.test(motivo);
+
+      const invalido = JSON.stringify(criado?.details || '')
+        .includes('not a valid WhatsApp');
+
+      if (invalido) {
+        // O número não existe no WhatsApp. Guardamos qual é: sem isso
+        // a mensagem de erro não ajuda a encontrar o lead.
+        return {
+          ok: false,
+          telefone_invalido: true,
+          telefone: fone,
+          erro: `numero sem WhatsApp: ${fone}`,
+        };
+      }
 
       return {
         ok: false,
@@ -3510,7 +3558,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v88-conjuntos',
+            versao: 'v89-erros-webhook',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4577,8 +4625,14 @@ export default {
             const r = await sincronizarMeta(l.slug, 7, db, env);
             if (!r.ok) {
               await db.insert('webhooks_raw', {
-                fonte: 'sync_meta_falhou', body: { lancamento: l.slug },
-                processado: false, erro: String(r.erro).slice(0, 400),
+                fonte: 'sync_meta_falhou',
+                body: { lancamento: l.slug, resposta: r },
+                processado: false,
+                erro: String(
+                  r.erro
+                  || (Array.isArray(r.erros) ? r.erros.join(' | ') : '')
+                  || 'falhou sem mensagem — veja o corpo guardado',
+                ).slice(0, 400),
               }).catch(() => {});
             }
           } catch (e: any) {
