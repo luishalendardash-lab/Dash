@@ -3510,7 +3510,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v87-telefone-ddi',
+            versao: 'v88-conjuntos',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4096,6 +4096,12 @@ export default {
 
           const r = await enviarEventosMeta(insc, db, env);
           return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'anuncio-conjuntos' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('dash_anuncio_conjuntos', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'opcoes-segmentacao' && req.method === 'POST') {
