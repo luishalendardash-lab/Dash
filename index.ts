@@ -3476,6 +3476,97 @@ async function avisarCaptacao(
   };
 }
 
+
+// =====================================================================
+// LIGAR E PAUSAR CONJUNTO PELO PAINEL
+//
+// Pausar o conjunto errado custa dinheiro de verdade, e no meio de uma
+// captação a decisão é rápida — abrir o Gerenciador, achar a campanha,
+// achar o conjunto, tudo isso enquanto o CPL sobe.
+//
+// Por isso a ação existe aqui, mas com três travas: só conjunto (nunca
+// campanha inteira), confirmação na tela antes de enviar, e registro
+// de tudo que foi feito.
+// =====================================================================
+async function mudarStatusAds(
+  corpo: any, db: Supabase, env: Env,
+): Promise<any> {
+  const id = String(corpo?.id || '').trim();
+  const novo = String(corpo?.status || '').toUpperCase();
+
+  if (!id) return { ok: false, erro: 'sem o conjunto' };
+
+  if (novo !== 'ACTIVE' && novo !== 'PAUSED') {
+    return { ok: false, erro: 'status tem que ser ACTIVE ou PAUSED' };
+  }
+
+  const token = (env.META_TOKEN || '').trim();
+  if (!token) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  // Só conjunto. Campanha e anúncio ficam de fora de propósito:
+  // pausar uma campanha por engano derruba o lançamento inteiro.
+  const ent = await db.select('ads_entidades', {
+    select: 'id,nivel,nome,status', id: `eq.${id}`, limit: '1',
+  }).catch(() => null);
+
+  const alvo = ent?.[0];
+  if (!alvo) return { ok: false, erro: 'conjunto nao encontrado na dash' };
+
+  if (alvo.nivel !== 'adset') {
+    return {
+      ok: false,
+      erro: `so da para ligar e pausar conjunto; este e ${alvo.nivel}`,
+    };
+  }
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+
+  try {
+    const r = await fetch(`https://graph.facebook.com/${versao}/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: novo, access_token: token }),
+    });
+
+    const resposta: any = await r.json().catch(() => ({}));
+
+    if (!r.ok || resposta?.error) {
+      const msg = resposta?.error?.message || `http ${r.status}`;
+
+      // O token de leitura é o caso mais comum e a mensagem do Meta não
+      // é óbvia — dizer o que fazer poupa meia hora de procura.
+      const semPermissao = /permission|ads_management|OAuth/i.test(msg);
+
+      return {
+        ok: false,
+        erro: semPermissao
+          ? 'o token do Meta nao tem permissao de escrita. Gere um novo em '
+            + 'Business Manager > Usuarios do sistema, com ads_management, '
+            + 'e troque o META_TOKEN no Worker.'
+          : msg,
+        detalhe: msg,
+      };
+    }
+
+    // o banco acompanha, para a bolinha mudar sem esperar a sincronização
+    await db.update('ads_entidades', { id: `eq.${id}` }, { status: novo })
+      .catch(() => {});
+
+    await db.insert('eventos', {
+      tipo: novo === 'ACTIVE' ? 'adset_ativado' : 'adset_pausado',
+      ocorreu_em: new Date().toISOString(),
+      fonte: 'dash',
+      payload: { adset_id: id, nome: alvo.nome, de: alvo.status, para: novo },
+      dedupe_key: `adset:${id}:${novo}:${Date.now()}`,
+    }).catch(() => {});
+
+    return { ok: true, id, nome: alvo.nome, status: novo };
+
+  } catch (e: any) {
+    return { ok: false, erro: String(e?.message || e) };
+  }
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -3558,7 +3649,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v90-periodo-ads',
+            versao: 'v92-periodo-rota',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4146,6 +4237,12 @@ export default {
           return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
         }
 
+        if (partes[1] === 'ads-status' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await mudarStatusAds(corpo, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
         if (partes[1] === 'anuncio-conjuntos' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
           const r = await db.rpc('dash_anuncio_conjuntos', { p: corpo });
@@ -4515,7 +4612,15 @@ export default {
         }
 
         if (partes[1] === 'anuncios') {
-          const r = await db.rpc('dash_anuncios', { p: { lancamento: slug } });
+          const r = await db.rpc('dash_anuncios', {
+            p: {
+              lancamento: slug,
+              // o período escolhido na tela; vazio significa o
+              // lançamento inteiro
+              de: url.searchParams.get('de') || '',
+              ate: url.searchParams.get('ate') || '',
+            },
+          });
           return jsonResponse({ ok: true, ...r }, 200, ch);
         }
 
