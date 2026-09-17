@@ -2964,25 +2964,7 @@ async function enviarReativacao(
         timestamp: new Date().toISOString(),
       };
 
-      let r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json;charset=UTF-8' },
-        body: JSON.stringify(dados),
-      });
-
-      // endpoint antigo pode só aceitar formulário: tentamos uma vez
-      // assim antes de dar a pessoa como perdida
-      if (!r.ok && (r.status === 400 || r.status === 415)) {
-        r = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams(
-            Object.fromEntries(
-              Object.entries(dados).map(([k, v]) => [k, String(v)]),
-            ),
-          ).toString(),
-        });
-      }
+      let r = await enviarComRepeticao(url, dados);
 
       const deuCerto = r.ok;
       if (deuCerto) enviados++; else falhas++;
@@ -3839,6 +3821,161 @@ async function duplicarConjunto(
   }
 }
 
+
+/**
+ * Manda ao SellFlux e tenta de novo quando o erro é temporário.
+ *
+ * O 502 vinha de um em cada quatro envios, e o histórico do SellFlux
+ * não registrava nada — a requisição morria na borda dele, sem chegar
+ * à aplicação. Dar a pessoa como perdida nesse caso é jogar lead fora
+ * por um engasgo de meio segundo.
+ *
+ * A pausa cresce a cada tentativa: insistir no mesmo ritmo contra um
+ * servidor sobrecarregado piora o problema.
+ */
+async function enviarComRepeticao(
+  url: string, dados: Record<string, any>, tentativas = 3,
+): Promise<Response> {
+  let r: Response | null = null;
+
+  for (let i = 0; i < tentativas; i++) {
+    if (i > 0) {
+      // 400ms, 1200ms — tempo de o servidor respirar
+      await new Promise((ok) => setTimeout(ok, 400 * (i * 2)));
+    }
+
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json;charset=UTF-8' },
+        body: JSON.stringify(dados),
+      });
+    } catch (e) {
+      // conexão derrubada: conta como tentativa e segue
+      if (i === tentativas - 1) throw e;
+      continue;
+    }
+
+    if (r.ok) return r;
+
+    // 400 e 415 são formato recusado, não sobrecarga: vale tentar
+    // como formulário, que é o que endpoint antigo espera
+    if (r.status === 400 || r.status === 415) {
+      const alt = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(
+          Object.fromEntries(
+            Object.entries(dados).map(([k, v]) => [k, String(v)]),
+          ),
+        ).toString(),
+      }).catch(() => null);
+
+      if (alt?.ok) return alt;
+      return alt || r;
+    }
+
+    // 4xx que não seja 408 ou 429 é recusa de verdade: repetir não muda
+    if (r.status >= 400 && r.status < 500
+        && r.status !== 408 && r.status !== 429) {
+      return r;
+    }
+
+    // 5xx, 408 e 429 são temporários: volta para o laço
+  }
+
+  return r as Response;
+}
+
+
+// =====================================================================
+// A FILA DE REATIVAÇÃO, PROCESSADA PELO CRON
+//
+// Antes o navegador comandava: cada volta era uma chamada da tela, e
+// fechar a aba parava o envio. Em 853 leads isso eram 4 minutos de
+// tela aberta.
+//
+// Agora o clique só enfileira. Isto roda em segundo plano, em
+// paralelo, e o 502 do SellFlux não perde mais o lead — ele volta para
+// a fila com hora marcada.
+// =====================================================================
+async function processarFilaReativacao(
+  db: Supabase, env: Env, limite = 40,
+): Promise<any> {
+  const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
+  const url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT
+    || SELLFLUX_REATIVACAO_PADRAO;
+
+  if (!url) return { ok: false, erro: 'endpoint do SellFlux nao configurado' };
+
+  const lote = await db.rpc('fila_reativacao_proximo', { p: { limite } });
+  const leads: any[] = lote?.leads || [];
+
+  if (!leads.length) return { ok: true, vazia: true, enviados: 0 };
+
+  // Em paralelo, de 8 em 8.
+  //
+  // Um a um levava 300ms cada; oito ao mesmo tempo cortam o tempo por
+  // oito. Mais que isso e o SellFlux começa a devolver 502 — foi o que
+  // aconteceu quando a tela mandava tudo em sequência rápida.
+  const resultados: any[] = [];
+  const porVez = 8;
+
+  for (let i = 0; i < leads.length; i += porVez) {
+    const bloco = leads.slice(i, i + porVez);
+
+    await Promise.all(bloco.map(async (l: any) => {
+      const dados = {
+        name: l.nome || '',
+        email: l.email || '',
+        phone: (l.telefone || '').replace(/^\+/, ''),
+        tag: l.campanha,
+        origem_lancamento: l.lancamento || '',
+        engenheiro: l.engenheiro ? 'sim' : 'nao',
+        perfil: l.resposta || '',
+        source: 'dash_reativacao',
+        timestamp: new Date().toISOString(),
+      };
+
+      try {
+        const r = await enviarComRepeticao(url, dados);
+
+        if (r.ok) {
+          resultados.push({ fila_id: l.fila_id, enviado: true });
+          return;
+        }
+
+        const texto = await r.text().catch(() => '');
+        // 5xx, 408 e 429 são engasgo passageiro: o lead volta para a
+        // fila em vez de ser dado como perdido
+        const temporario = r.status >= 500 || r.status === 408 || r.status === 429;
+
+        resultados.push({
+          fila_id: l.fila_id, enviado: false, temporario,
+          erro: `http ${r.status}: ${String(texto).slice(0, 200)}`,
+        });
+
+      } catch (e: any) {
+        // erro de rede também é passageiro
+        resultados.push({
+          fila_id: l.fila_id, enviado: false, temporario: true,
+          erro: String(e?.message || e).slice(0, 200),
+        });
+      }
+    }));
+  }
+
+  const r = await db.rpc('fila_reativacao_resultado', { p: { resultados } });
+
+  return {
+    ok: true,
+    pegos: leads.length,
+    enviados: r?.enviados || 0,
+    voltaram: r?.voltaram_para_fila || 0,
+    desistiu: r?.desistiu || 0,
+  };
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -3921,7 +4058,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v97-reativar-lotes',
+            versao: 'v98-reativar-fila',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4509,6 +4646,31 @@ export default {
           return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
         }
 
+        if (partes[1] === 'reativar-fila' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('enfileirar_reativacao', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'reativar-status') {
+          const r = await db.rpc('fila_reativacao_status', {
+            p: { campanha: url.searchParams.get('campanha') || '' },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'reativar-cancelar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('fila_reativacao_cancelar', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        // empurra a fila na hora, sem esperar o cron
+        if (partes[1] === 'reativar-empurrar' && req.method === 'POST') {
+          const r = await processarFilaReativacao(db, env, 40);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
         if (partes[1] === 'ads-conjunto') {
           const r = await lerConjuntoMeta(
             url.searchParams.get('id') || '', env,
@@ -4989,6 +5151,15 @@ export default {
           select: 'slug',
           status: 'in.(captacao,aquecimento,evento,carrinho)',
         });
+        // A fila de reativação primeiro: ela é a única coisa aqui com
+        // alguém esperando do outro lado. Cinco voltas por execução
+        // dão 200 leads por hora — uma base de 10 mil sai em dois dias
+        // sem ninguém precisar deixar a tela aberta.
+        for (let volta = 0; volta < 5; volta++) {
+          const f = await processarFilaReativacao(db, env, 40).catch(() => null);
+          if (!f || f.vazia || !f.pegos) break;
+        }
+
         // o aviso de captação: a própria função decide se é hora,
         // respeitando o intervalo e o horário configurados
         try {
