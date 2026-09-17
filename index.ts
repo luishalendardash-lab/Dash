@@ -3010,21 +3010,39 @@ async function enviarReativacao(
         resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
       });
     }
+
+    // Grava de 20 em 20, enquanto o laço roda.
+    //
+    // Se o Worker for cortado por tempo no meio, o que já foi enviado
+    // está registrado — e não volta no próximo lote. Guardar tudo para
+    // o fim significava perder o registro inteiro quando o tempo
+    // acabava.
+    if (envios.length >= 20) {
+      await db.rpc('registrar_reativacao', {
+        p: { campanha, envios: envios.splice(0, envios.length) },
+      }).catch(() => {});
+    }
+
+    // Um limite de segurança: acima disso o Worker corre risco de ser
+    // cortado. A tela chama de novo e o envio continua de onde parou.
+    if (enviados + falhas >= 60) break;
   }
 
-  // Registra antes de devolver: se a tela parar aqui, o próximo lote
-  // não repete quem já foi.
+  // Registra o que sobrou do último bloco.
   //
-  // O erro deste registro NÃO pode ser engolido: sem gravar, o lote
-  // seguinte traz os mesmos leads e o envio entra em loop — foi
-  // exatamente o que aconteceu num envio de 6.147, com 196 enviados,
-  // 604 falhas e nada gravado.
+  // O registro acontece em blocos durante o laço, não só aqui: o
+  // Worker tem tempo limitado, e um lote grande o mata antes desta
+  // linha. Foi o que aconteceu num envio de 6.147 — 54 leads chegaram
+  // ao SellFlux, o Worker morreu, e nada foi gravado. No lote
+  // seguinte os mesmos leads voltaram.
   let erroRegistro: string | null = null;
-  try {
-    const reg = await db.rpc('registrar_reativacao', { p: { campanha, envios } });
-    if (reg?.ok === false) erroRegistro = String(reg?.erro || 'falhou sem mensagem');
-  } catch (e: any) {
-    erroRegistro = String(e?.message || e).slice(0, 300);
+  if (envios.length) {
+    try {
+      const reg = await db.rpc('registrar_reativacao', { p: { campanha, envios } });
+      if (reg?.ok === false) erroRegistro = String(reg?.erro || 'falhou sem mensagem');
+    } catch (e: any) {
+      erroRegistro = String(e?.message || e).slice(0, 300);
+    }
   }
 
   if (erroRegistro) {
@@ -3045,8 +3063,9 @@ async function enviarReativacao(
     lote: leads.length,
     // a primeira mensagem de erro real, para a tela mostrar
     // menos que o limite significa que a fila acabou
-    acabou: leads.length < Number(corpo.limite || 200),
-    primeiro_erro: primeiroErro || envios.find((e: any) => e.erro)?.erro,
+    acabou: leads.length < Number(corpo.limite || 200)
+            && (enviados + falhas) < 60,
+    primeiro_erro: primeiroErro,
   };
 }
 
@@ -3902,7 +3921,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v96-reativar-erro',
+            versao: 'v97-reativar-lotes',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
