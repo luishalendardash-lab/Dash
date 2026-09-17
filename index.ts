@@ -1454,7 +1454,39 @@ async function sincronizarConta(
     fields: 'ad_id,impressions,reach,clicks,inline_link_clicks,inline_link_click_ctr,spend,ctr,cpm,cpc,actions,cost_per_action_type,video_play_actions',
   }, env);
 
-  const idsAnuncio = new Set(anuncios.map((a: any) => a.id));
+  // Só anúncio de campanha de CAPTAÇÃO entra no custo.
+  //
+  // Uma campanha de engajamento com o código do lançamento no nome
+  // somava ao investimento e piorava o CPL de todo mundo: o gasto
+  // entrava e os leads não, porque engajamento não traz lead.
+  //
+  // Engajamento e remarketing têm o seu papel; só não contam no custo
+  // por lead da captação.
+  const semAcento = (s: string) => s
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+  const campanhasDeCaptacao = new Set(
+    campanhas
+      .filter((c: any) => semAcento(String(c.name || '')).includes('CAPTACAO'))
+      .map((c: any) => c.id),
+  );
+
+  const conjuntoParaCampanha = new Map(
+    conjuntos.map((a: any) => [a.id, a.campaign_id]),
+  );
+
+  const idsAnuncio = new Set(
+    anuncios
+      .filter((a: any) => {
+        // sem campanha identificada, deixa passar: melhor contar um
+        // gasto a mais do que perder o de um anúncio válido
+        const camp = conjuntoParaCampanha.get(a.adset_id);
+        if (!camp) return true;
+        return campanhasDeCaptacao.has(camp);
+      })
+      .map((a: any) => a.id),
+  );
+
   const insights = bruto
     .filter((i: any) => idsAnuncio.has(i.ad_id))   // ignora anúncio fora do filtro do lançamento
     .map((i: any) => {
@@ -2902,6 +2934,7 @@ async function enviarReativacao(
   const envios: any[] = [];
   let enviados = 0;
   let falhas = 0;
+  let primeiroErro: string | null = null;
 
   for (const l of leads) {
     try {
@@ -2954,10 +2987,20 @@ async function enviarReativacao(
       const deuCerto = r.ok;
       if (deuCerto) enviados++; else falhas++;
 
+      // A resposta do SellFlux vai junto quando falha. Guardar só o
+      // código HTTP não diz nada: 604 falhas com "http 429" e 604 com
+      // "http 422" pedem soluções opostas.
+      let detalhe: string | null = null;
+      if (!deuCerto) {
+        detalhe = await r.text().catch(() => '');
+        detalhe = `http ${r.status}: ${String(detalhe).slice(0, 300)}`;
+        if (!primeiroErro) primeiroErro = detalhe;
+      }
+
       envios.push({
         pessoa_id: l.pessoa_id, inscricao_id: l.inscricao_id, canal: 'email',
         resultado: deuCerto ? 'enviado' : 'falhou',
-        erro: deuCerto ? null : `http ${r.status}`,
+        erro: detalhe,
       });
 
     } catch (e: any) {
@@ -2969,18 +3012,41 @@ async function enviarReativacao(
     }
   }
 
-  // registra antes de devolver: se a tela parar aqui, o próximo lote
-  // não repete quem já foi
-  await db.rpc('registrar_reativacao', { p: { campanha, envios } }).catch(() => {});
+  // Registra antes de devolver: se a tela parar aqui, o próximo lote
+  // não repete quem já foi.
+  //
+  // O erro deste registro NÃO pode ser engolido: sem gravar, o lote
+  // seguinte traz os mesmos leads e o envio entra em loop — foi
+  // exatamente o que aconteceu num envio de 6.147, com 196 enviados,
+  // 604 falhas e nada gravado.
+  let erroRegistro: string | null = null;
+  try {
+    const reg = await db.rpc('registrar_reativacao', { p: { campanha, envios } });
+    if (reg?.ok === false) erroRegistro = String(reg?.erro || 'falhou sem mensagem');
+  } catch (e: any) {
+    erroRegistro = String(e?.message || e).slice(0, 300);
+  }
+
+  if (erroRegistro) {
+    // parar é mais seguro que seguir: continuar sem registro reenviaria
+    // os mesmos leads
+    return {
+      ok: false,
+      erro: `os envios nao foram gravados (${erroRegistro}). `
+          + 'O envio parou aqui para nao repetir os mesmos leads.',
+      enviados, falhas, lote: leads.length, acabou: true,
+    };
+  }
 
   return {
     ok: true,
     enviados,
     falhas,
     lote: leads.length,
+    // a primeira mensagem de erro real, para a tela mostrar
     // menos que o limite significa que a fila acabou
     acabou: leads.length < Number(corpo.limite || 200),
-    primeiro_erro: envios.find((e) => e.erro)?.erro,
+    primeiro_erro: primeiroErro || envios.find((e: any) => e.erro)?.erro,
   };
 }
 
@@ -3567,6 +3633,193 @@ async function mudarStatusAds(
   }
 }
 
+
+// =====================================================================
+// ORÇAMENTO E DUPLICAÇÃO DE CONJUNTO
+//
+// As duas decisões que hoje obrigam a sair da dash no meio da
+// captação: um conjunto está indo bem e merece mais verba, ou merece
+// ser duplicado para testar outro público.
+//
+// Mexer em verba tem consequência imediata, então tudo aqui passa por
+// confirmação na tela e fica registrado.
+// =====================================================================
+
+/** Lê o orçamento e o gasto de hoje de um conjunto. */
+async function lerConjuntoMeta(id: string, env: Env): Promise<any> {
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const campos = [
+    'id', 'name', 'status', 'daily_budget', 'lifetime_budget',
+    'bid_strategy', 'campaign_id', 'targeting',
+  ].join(',');
+
+  const r = await fetch(
+    `https://graph.facebook.com/${versao}/${id}?fields=${campos}`
+    + `&access_token=${encodeURIComponent(env.META_TOKEN || '')}`,
+  );
+
+  const d: any = await r.json().catch(() => ({}));
+  if (!r.ok || d?.error) {
+    return { ok: false, erro: d?.error?.message || `http ${r.status}` };
+  }
+
+  // o Meta trabalha em centavos; a tela mostra em reais
+  return {
+    ok: true,
+    id: d.id,
+    nome: d.name,
+    status: d.status,
+    diario: d.daily_budget ? Number(d.daily_budget) / 100 : null,
+    total: d.lifetime_budget ? Number(d.lifetime_budget) / 100 : null,
+    campanha_id: d.campaign_id,
+    // orçamento na campanha (CBO): o conjunto não tem o próprio
+    no_conjunto: !!(d.daily_budget || d.lifetime_budget),
+  };
+}
+
+async function mudarOrcamento(
+  corpo: any, db: Supabase, env: Env,
+): Promise<any> {
+  const id = String(corpo?.id || '').trim();
+  const valor = Number(corpo?.valor);
+
+  if (!id) return { ok: false, erro: 'sem o conjunto' };
+
+  if (!Number.isFinite(valor) || valor <= 0) {
+    return { ok: false, erro: 'valor invalido' };
+  }
+
+  // O Meta exige um mínimo por conjunto, que varia por moeda e tipo de
+  // otimização. Abaixo disso ele recusa com mensagem pouco clara.
+  if (valor < 6) {
+    return { ok: false, erro: 'o Meta nao aceita diario abaixo de R$ 6' };
+  }
+
+  const atual = await lerConjuntoMeta(id, env);
+  if (!atual.ok) return atual;
+
+  if (!atual.no_conjunto) {
+    return {
+      ok: false,
+      erro: 'o orcamento desta campanha esta no nivel da campanha (CBO), '
+          + 'nao no conjunto. Mude no Gerenciador ou troque a campanha para ABO.',
+    };
+  }
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+  const campo = atual.total ? 'lifetime_budget' : 'daily_budget';
+
+  try {
+    const r = await fetch(`https://graph.facebook.com/${versao}/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        [campo]: Math.round(valor * 100),
+        access_token: env.META_TOKEN,
+      }),
+    });
+
+    const d: any = await r.json().catch(() => ({}));
+
+    if (!r.ok || d?.error) {
+      return { ok: false, erro: d?.error?.message || `http ${r.status}` };
+    }
+
+    await db.insert('eventos', {
+      tipo: 'orcamento_alterado',
+      ocorreu_em: new Date().toISOString(),
+      fonte: 'dash',
+      payload: {
+        adset_id: id, nome: atual.nome,
+        de: atual.diario || atual.total, para: valor, campo,
+      },
+      dedupe_key: `orc:${id}:${Date.now()}`,
+    }).catch(() => {});
+
+    return {
+      ok: true, id, nome: atual.nome,
+      de: atual.diario || atual.total, para: valor,
+      tipo: campo === 'daily_budget' ? 'diario' : 'total',
+    };
+
+  } catch (e: any) {
+    return { ok: false, erro: String(e?.message || e) };
+  }
+}
+
+/**
+ * Duplica o conjunto com os anúncios dentro.
+ *
+ * A cópia pode nascer ativa ou pausada, e quem escolhe é quem clica.
+ * Duplicar um conjunto que já está validado e ter que ir ao Gerenciador
+ * ativar anula o ganho de fazer isso aqui — mas duplicar algo que ainda
+ * precisa de ajuste e sair gastando é pior. Por isso a pergunta.
+ */
+async function duplicarConjunto(
+  corpo: any, db: Supabase, env: Env,
+): Promise<any> {
+  const id = String(corpo?.id || '').trim();
+  if (!id) return { ok: false, erro: 'sem o conjunto' };
+
+  const jaAtiva = corpo?.ativar === true;
+
+  const atual = await lerConjuntoMeta(id, env);
+  if (!atual.ok) return atual;
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+
+  try {
+    const r = await fetch(`https://graph.facebook.com/${versao}/${id}/copies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deep_copy: true,              // leva os anúncios junto
+        // ACTIVE só entra quando a pessoa pediu; INHERITED_FROM_SOURCE
+        // copiaria o status do original, o que é ambíguo demais
+        status_option: jaAtiva ? 'ACTIVE' : 'PAUSED',
+        rename_options: {
+          rename_strategy: 'DEEP_RENAME',
+          rename_suffix: corpo?.sufixo || ' — cópia',
+        },
+        access_token: env.META_TOKEN,
+      }),
+    });
+
+    const d: any = await r.json().catch(() => ({}));
+
+    if (!r.ok || d?.error) {
+      return { ok: false, erro: d?.error?.message || `http ${r.status}` };
+    }
+
+    const novoId = d?.copied_adset_id || d?.id;
+
+    await db.insert('eventos', {
+      tipo: 'conjunto_duplicado',
+      ocorreu_em: new Date().toISOString(),
+      fonte: 'dash',
+      payload: {
+        origem: id, nome_origem: atual.nome, novo: novoId,
+        nasceu_ativo: jaAtiva,
+      },
+      dedupe_key: `dup:${id}:${Date.now()}`,
+    }).catch(() => {});
+
+    return {
+      ok: true,
+      novo_id: novoId,
+      nome_origem: atual.nome,
+      ativa: jaAtiva,
+      orcamento: atual.diario || atual.total,
+      aviso: jaAtiva
+        ? 'a cópia já está rodando e gastando'
+        : 'a cópia nasceu pausada — ative quando quiser',
+    };
+
+  } catch (e: any) {
+    return { ok: false, erro: String(e?.message || e) };
+  }
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -3649,7 +3902,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v92-periodo-rota',
+            versao: 'v96-reativar-erro',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4235,6 +4488,25 @@ export default {
 
           const r = await enviarEventosMeta(insc, db, env);
           return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'ads-conjunto') {
+          const r = await lerConjuntoMeta(
+            url.searchParams.get('id') || '', env,
+          );
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'ads-orcamento' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await mudarOrcamento(corpo, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'ads-duplicar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await duplicarConjunto(corpo, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
         }
 
         if (partes[1] === 'ads-status' && req.method === 'POST') {
