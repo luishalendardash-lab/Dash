@@ -2892,6 +2892,48 @@ async function subirImagem(req: Request, env: Env, ch: Record<string, string>) {
 // Cada lote registra quem foi antes de seguir, então parar no meio e
 // retomar não manda duas vezes para ninguém.
 // =====================================================================
+
+// =====================================================================
+// PARA ONDE CADA LEAD VAI
+//
+// A dash manda lead para o SellFlux em quatro situações, e elas usam
+// destinos diferentes. Escolher o errado põe a pessoa na sequência
+// errada — foi o que aconteceu quando a fila de reativação apontou
+// para o webhook de captação e 500 leads antigos entraram no fluxo de
+// quem acabou de se inscrever.
+//
+// Por isso a escolha acontece num lugar só. Quem envia pede o destino
+// pelo nome do que está fazendo, não monta a URL por conta própria.
+// =====================================================================
+type DestinoLead = 'captacao' | 'reativacao';
+
+async function destinoSellflux(
+  qual: DestinoLead, db: Supabase, env: Env,
+): Promise<{ url: string | null; nome: string; fonte: string }> {
+
+  if (qual === 'reativacao') {
+    // O fluxo de volta, para lead de lançamento antigo.
+    const url = String(env.SELLFLUX_REATIVACAO || '').trim()
+      || SELLFLUX_REATIVACAO_PADRAO;
+
+    return {
+      url: url ? (/^https?:\/\//i.test(url) ? url : `https://${url}`) : null,
+      nome: 'reativação',
+      fonte: env.SELLFLUX_REATIVACAO ? 'SELLFLUX_REATIVACAO' : 'padrão do código',
+    };
+  }
+
+  // A sequência de aquecimento do lançamento em andamento.
+  const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
+  const url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT || '';
+
+  return {
+    url: url ? (/^https?:\/\//i.test(url) ? url : `https://${url}`) : null,
+    nome: 'captação',
+    fonte: (cfg?.ativa && cfg?.valor) ? 'tela de Integrações' : 'SELLFLUX_ENDPOINT',
+  };
+}
+
 /** Automação de reativação no SellFlux. Trocável por SELLFLUX_REATIVACAO. */
 const SELLFLUX_REATIVACAO_PADRAO =
   'https://webhook.sellflux.app/v2/webhook/form_game/d576e8b8ae89eb7625f0ba0e6414320f';
@@ -2905,11 +2947,14 @@ async function enviarReativacao(
   //
   // Fica aqui porque não muda de campanha para campanha. Para trocar
   // sem mexer no código, basta criar SELLFLUX_REATIVACAO no Worker.
-  let url = String(corpo.endpoint || '').trim()
-    || env.SELLFLUX_REATIVACAO
-    || SELLFLUX_REATIVACAO_PADRAO;
+  // O endpoint vem da função, não do corpo da requisição: aceitar URL
+  // de fora deixaria a tela mandar lead para qualquer lugar.
+  const destino = await destinoSellflux('reativacao', db, env);
+  const url = destino.url;
 
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  if (!url) {
+    return { ok: false, erro: 'endpoint de reativacao nao configurado' };
+  }
 
   const campanha = String(corpo.campanha || '').trim();
   if (!campanha) return { ok: false, erro: 'de um nome a campanha' };
@@ -3902,11 +3947,10 @@ async function enviarComRepeticao(
 async function processarFilaReativacao(
   db: Supabase, env: Env, limite = 40,
 ): Promise<any> {
-  const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
-  const url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT
-    || SELLFLUX_REATIVACAO_PADRAO;
+  const destino = await destinoSellflux('reativacao', db, env);
+  const url = destino.url;
 
-  if (!url) return { ok: false, erro: 'endpoint do SellFlux nao configurado' };
+  if (!url) return { ok: false, erro: 'endpoint de reativacao nao configurado' };
 
   const lote = await db.rpc('fila_reativacao_proximo', { p: { limite } });
   const leads: any[] = lote?.leads || [];
@@ -4058,11 +4102,14 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v98-reativar-fila',
+            versao: 'v100-destino-unico',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
             sellflux_endpoint: env.SELLFLUX_ENDPOINT ? 'configurado' : 'nao configurado',
+            // os dois destinos, para conferir de relance qual é qual
+            destino_captacao: (await destinoSellflux('captacao', db, env)).fonte,
+            destino_reativacao: (await destinoSellflux('reativacao', db, env)).fonte,
           },
         });
       }
@@ -4644,6 +4691,19 @@ export default {
 
           const r = await enviarEventosMeta(insc, db, env);
           return jsonResponse({ ...r, inscricao_id: insc }, r.ok ? 200 : 400, ch);
+        }
+
+        // qual webhook a reativação vai usar, para a tela mostrar
+        // antes de mandar
+        if (partes[1] === 'reativar-destino') {
+          const d = await destinoSellflux('reativacao', db, env);
+          return jsonResponse({
+            ok: !!d.url,
+            nome: d.nome,
+            fonte: d.fonte,
+            // só o final, o suficiente para reconhecer sem expor a URL
+            final: d.url ? String(d.url).slice(-12) : null,
+          }, 200, ch);
         }
 
         if (partes[1] === 'reativar-fila' && req.method === 'POST') {
