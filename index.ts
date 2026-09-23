@@ -4290,8 +4290,10 @@ const MCP_VERSOES = [
  */
 function mcpFerramentas() {
   return [
+    // ---------- conteúdo ----------
     {
       name: 'posts_instagram',
+      area: 'conteúdo',
       description:
         'Os posts do Instagram com desempenho: curtidas, comentários, '
         + 'salvamentos, compartilhamentos, alcance, views e taxa de '
@@ -4301,71 +4303,204 @@ function mcpFerramentas() {
       inputSchema: {
         type: 'object',
         properties: {
-          formato: {
-            type: 'string',
-            enum: ['REELS', 'FEED', 'STORY'],
-            description: 'Filtra por formato. Vazio traz todos.',
-          },
-          ordem: {
-            type: 'string',
+          formato: { type: 'string', enum: ['REELS', 'FEED', 'STORY'],
+            description: 'Filtra por formato. Vazio traz todos.' },
+          ordem: { type: 'string',
             enum: ['data', 'taxa', 'salvos', 'views', 'alcance', 'comentarios'],
-            description: 'Como ordenar. O padrão é por data.',
-          },
-          dias: {
-            type: 'integer',
-            description: 'Só os posts dos últimos N dias.',
-          },
+            description: 'Como ordenar. O padrão é por data.' },
+          dias: { type: 'integer', description: 'Só os últimos N dias.' },
         },
       },
     },
     {
       name: 'analise_formatos',
+      area: 'conteúdo',
       description:
-        'Compara os formatos entre si — Reels, Feed, Stories — com views '
-        + 'médio, alcance médio, salvamentos médio e engajamento de cada. '
-        + 'Traz também os cinco posts que mais e os cinco que menos '
-        + 'engajaram. Use para decidir em que formato investir.',
+        'Compara os formatos do Instagram entre si — Reels, Feed, Stories — '
+        + 'com views médio, alcance médio, salvamentos médio e engajamento. '
+        + 'Traz os cinco posts que mais e os cinco que menos engajaram. '
+        + 'Use para decidir em que formato investir.',
       inputSchema: {
         type: 'object',
         properties: {
-          dias: {
-            type: 'integer',
-            description: 'Período de análise em dias. O padrão é 90.',
-          },
+          dias: { type: 'integer', description: 'Período. O padrão é 90 dias.' },
         },
       },
     },
-    {
-      name: 'resumo_lancamento',
-      description:
-        'Como está o lançamento em andamento: leads capturados, quantos '
-        + 'são engenheiros, quantos entraram no grupo, quanto foi '
-        + 'investido, custo por lead e por engenheiro, receita e meta. '
-        + 'Use para dar contexto de negócio à análise de conteúdo.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          lancamento: {
-            type: 'string',
-            description: 'O código do lançamento. Vazio usa o que está ativo.',
-          },
-        },
-      },
-    },
+
+    // ---------- tráfego pago ----------
     {
       name: 'desempenho_criativos',
+      area: 'tráfego pago',
       description:
         'Os anúncios pagos por criativo: leads, engenheiros, investido, '
-        + 'custo por lead, custo por engenheiro e a divisão por resposta '
-        + 'do quiz. Use para saber que ângulo funciona no tráfego pago e '
-        + 'comparar com o que funciona no orgânico.',
+        + 'custo por lead, custo por engenheiro, compras e a divisão por '
+        + 'resposta do quiz. Marca os criativos que gastaram sem trazer '
+        + 'lead. Use para saber que ângulo funciona no tráfego e onde '
+        + 'está havendo desperdício.',
       inputSchema: {
         type: 'object',
         properties: {
-          lancamento: {
-            type: 'string',
-            description: 'O código do lançamento. Vazio usa o que está ativo.',
-          },
+          lancamento: { type: 'string',
+            description: 'Código do lançamento. Vazio usa o ativo.' },
+          de: { type: 'string', description: 'Data inicial, AAAA-MM-DD.' },
+          ate: { type: 'string', description: 'Data final, AAAA-MM-DD.' },
+        },
+      },
+    },
+    {
+      name: 'conjuntos_do_criativo',
+      area: 'tráfego pago',
+      description:
+        'Abre um criativo nos conjuntos de anúncio onde ele roda, com o '
+        + 'público de cada um, leads, custo e se está ativo ou pausado. '
+        + 'Use quando o criativo agregado parece bom ou ruim mas você '
+        + 'precisa saber em qual público. Peça primeiro o '
+        + 'desempenho_criativos para descobrir a chave do criativo.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chave: { type: 'string',
+            description: 'A chave do criativo, como aparece em desempenho_criativos.' },
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+        required: ['chave'],
+      },
+    },
+    {
+      name: 'captacao_dia_a_dia',
+      area: 'tráfego pago',
+      description:
+        'A série diária do lançamento: leads, engenheiros, investido e '
+        + 'custo por lead de cada dia. Use para ver tendência, identificar '
+        + 'o dia em que o custo subiu e relacionar com o que foi publicado '
+        + 'ou mudado nas campanhas.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dias: { type: 'integer', description: 'Quantos dias. O padrão é 30.' },
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+
+    // ---------- leads ----------
+    {
+      name: 'funil_de_leads',
+      area: 'leads',
+      description:
+        'O funil da captação: quantos leads entraram, quantos fizeram o '
+        + 'quiz, quantos clicaram no link do grupo e quantos entraram no '
+        + 'grupo do WhatsApp, com as taxas entre as etapas. Use para achar '
+        + 'onde o lead está escapando.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+    {
+      name: 'perfil_da_base',
+      area: 'leads',
+      description:
+        'Quem são os leads, segundo as respostas do quiz: todas as '
+        + 'perguntas com a distribuição das respostas em número e '
+        + 'porcentagem. Use para entender o público que está entrando e '
+        + 'ajustar a comunicação. Não traz nome nem contato de ninguém.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+    {
+      name: 'buscar_lead',
+      area: 'leads',
+      description:
+        'A ficha de UM lead, procurado por e-mail, telefone ou nome: em '
+        + 'que lançamentos participou, o que respondeu no quiz, se entrou '
+        + 'no grupo e o que comprou. Use quando a pergunta é sobre uma '
+        + 'pessoa específica. Não existe jeito de listar a base inteira, '
+        + 'de propósito.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          busca: { type: 'string',
+            description: 'E-mail, telefone ou nome do lead.' },
+        },
+        required: ['busca'],
+      },
+    },
+
+    // ---------- negócio ----------
+    {
+      name: 'resumo_lancamento',
+      area: 'negócio',
+      description:
+        'O quadro completo do lançamento: leads, engenheiros, investido, '
+        + 'custo por lead e por engenheiro, vendas, receita, ROAS, ticket, '
+        + 'lucro, margem, conversão e progresso das metas. É a primeira '
+        + 'ferramenta a chamar quando a pergunta é "como está o lançamento".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+    {
+      name: 'vendas',
+      area: 'negócio',
+      description:
+        'As vendas do lançamento: receita bruta e líquida, aprovadas, '
+        + 'pendentes, reembolsos, ticket médio, quebra por produto e por '
+        + 'plataforma. Use para entender o que está vendendo e o que não.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+    {
+      name: 'aulas',
+      area: 'negócio',
+      description:
+        'O desempenho das aulas do evento: views, pico de audiência, '
+        + 'presentes no fim, retenção média e comentários de cada uma, '
+        + 'comparado com o lançamento anterior. Use para avaliar o '
+        + 'aquecimento e planejar o próximo evento.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: { type: 'string', description: 'Vazio usa o ativo.' },
+        },
+      },
+    },
+
+    // ---------- histórico e saúde ----------
+    {
+      name: 'comparar_lancamentos',
+      area: 'histórico',
+      description:
+        'Todos os lançamentos lado a lado: leads, engenheiros, investido, '
+        + 'CPL, receita, ROAS e conversão de cada um. Use para responder '
+        + 'se este lançamento está melhor ou pior que os anteriores.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'saude_da_dash',
+      area: 'histórico',
+      description:
+        'O que está com problema: webhooks falhando, leads sem telefone '
+        + 'válido, gasto sem lead correspondente. Use quando algum número '
+        + 'parecer errado, ou quando pedirem um diagnóstico geral.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dias: { type: 'integer', description: 'Período. O padrão é 7 dias.' },
         },
       },
     },
@@ -4376,31 +4511,32 @@ async function mcpChamar(
   nome: string, args: any, db: Supabase, env: Env,
 ): Promise<string> {
 
+  // Os números viram texto, não JSON cru: o modelo lê melhor, e a
+  // resposta não estoura com chaves e colchetes.
+  const num = (v: any) => (v == null ? '-' : String(v));
+  const reais = (v: any) => (v == null ? '-' : `R$ ${v}`);
+  const pct = (v: any) => (v == null ? '-' : `${v}%`);
+  const lanc = () => args?.lancamento || '';
+
+  // ---------- conteúdo ----------
   if (nome === 'posts_instagram') {
     const dias = Number(args?.dias);
-    let de = '';
-    if (Number.isFinite(dias) && dias > 0) {
-      de = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
-    }
+    const de = Number.isFinite(dias) && dias > 0
+      ? new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10) : '';
 
     const r = await db.rpc('dash_instagram', {
-      p: {
-        de, tipo: args?.formato || '',
-        ordem: args?.ordem || 'data',
-      },
+      p: { de, tipo: args?.formato || '', ordem: args?.ordem || 'data' },
     });
 
     if (r?.sem_conta) {
-      return 'Nenhuma conta do Instagram conectada na dash ainda. '
-        + 'Conecte em Ferramentas > Conteúdo.';
+      return 'Nenhuma conta do Instagram conectada. '
+        + 'Conecte em Ferramentas > Conteudo na dash.';
     }
 
     const posts: any[] = (r?.posts || []).slice(0, 40);
     const c = r?.conta || {};
     const s = r?.resumo || {};
 
-    // Texto, não JSON cru: o modelo lê melhor, e a legenda fica curta
-    // para a resposta não estourar.
     const linhas = posts.map((p: any) => {
       const pedacos = [
         p.produto || 'FEED',
@@ -4416,32 +4552,28 @@ async function mcpChamar(
 
       const legenda = String(p.legenda || '(sem legenda)')
         .replace(/\s+/g, ' ').slice(0, 140);
-
       return `- "${legenda}"\n  ${pedacos.join(' | ')}`;
     });
 
     return [
       `Conta: @${c.username || '?'}`
         + (c.seguidores ? ` (${c.seguidores} seguidores)` : ''),
-      `Periodo: ${s.posts || 0} posts, ${s.salvos || 0} salvamentos no total`
+      `Periodo: ${s.posts || 0} posts, ${s.salvos || 0} salvamentos`
         + (s.taxa_media != null ? `, engajamento medio ${s.taxa_media}%` : ''),
       '',
       'A taxa de engajamento e sobre o ALCANCE, nao sobre seguidores:',
       'mede se quem viu reagiu.',
       '',
       ...linhas,
-      posts.length >= 40 ? '\n(mostrando os 40 primeiros)' : '',
+      posts.length >= 40 ? '\n(os 40 primeiros)' : '',
     ].filter(Boolean).join('\n');
   }
 
   if (nome === 'analise_formatos') {
     const r = await db.rpc('ig_analise', { p: { dias: args?.dias || '' } });
-
     if (r?.ok === false) return String(r?.erro || 'sem dados');
 
-    const fmt: any[] = r?.por_formato || [];
-
-    const tabela = fmt.map((f: any) =>
+    const tabela = (r?.por_formato || []).map((f: any) =>
       `- ${f.formato}: ${f.posts} posts | views medio ${f.views_medio} | `
       + `alcance medio ${f.alcance_medio} | salvos medio ${f.salvos_medio} | `
       + `engajamento ${f.taxa_media ?? '-'}%`);
@@ -4451,7 +4583,7 @@ async function mcpChamar(
       return `\n${titulo}\n` + arr.map((p: any) =>
         `- ${p.taxa}% (${p.produto}, ${(p.publicado_em || '').slice(0, 10)}): `
         + `"${String(p.legenda || '').replace(/\s+/g, ' ').slice(0, 120)}"`
-        + (p.salvos != null ? ` — ${p.salvos} salvos` : '')).join('\n');
+        + (p.salvos != null ? ` - ${p.salvos} salvos` : '')).join('\n');
     };
 
     return [
@@ -4462,69 +4594,350 @@ async function mcpChamar(
     ].filter(Boolean).join('\n');
   }
 
-  if (nome === 'resumo_lancamento') {
-    const r = await db.rpc('dash_captura', {
-      p: { lancamento: args?.lancamento || '' },
-    });
-
-    if (r?.ok === false) return String(r?.erro || 'sem dados');
-
-    const linhas = [
-      `Lancamento: ${r.nome || r.lancamento} (${r.status})`,
-      `Leads: ${r.leads ?? 0}`,
-      `Engenheiros: ${r.engenheiros ?? 0}`
-        + (r.leads ? ` (${Math.round(100 * r.engenheiros / r.leads)}% do total)` : ''),
-      r.no_grupo != null ? `No grupo do WhatsApp: ${r.no_grupo}` : '',
-      `Investido: R$ ${r.investido ?? 0}`,
-      r.cpl != null ? `Custo por lead: R$ ${r.cpl}` : '',
-      r.cpl_engenheiro != null ? `Custo por engenheiro: R$ ${r.cpl_engenheiro}` : '',
-      r.meta_leads ? `Meta de leads: ${r.meta_leads}` : '',
-      r.leads_faltantes ? `Faltam capturar: ${r.leads_faltantes}` : '',
-    ];
-
-    return linhas.filter(Boolean).join('\n');
-  }
-
+  // ---------- tráfego pago ----------
   if (nome === 'desempenho_criativos') {
     const r = await db.rpc('dash_anuncios', {
-      p: { lancamento: args?.lancamento || '' },
+      p: { lancamento: lanc(), de: args?.de || '', ate: args?.ate || '' },
     });
-
     if (r?.ok === false) return String(r?.erro || 'sem dados');
 
     const anuncios: any[] = (r?.anuncios || []).slice(0, 25);
     const colunas: any[] = r?.colunas_quiz || [];
+    const q = r?.queimando || {};
 
     const linhas = anuncios.map((a: any) => {
-      const pedacos = [
-        `${a.leads} leads`,
-        `${a.engenheiros} engenheiros`,
-      ];
-      if (a.gasto) pedacos.push(`R$ ${a.gasto} investido`);
-      if (a.cpl != null) pedacos.push(`CPL R$ ${a.cpl}`);
-      if (a.cpl_engenheiro != null) pedacos.push(`CPL eng R$ ${a.cpl_engenheiro}`);
+      const pedacos = [`${a.leads} leads`, `${a.engenheiros} engenheiros`];
+      if (a.gasto) pedacos.push(`${reais(a.gasto)} investido`);
+      if (a.cpl != null) pedacos.push(`CPL ${reais(a.cpl)}`);
+      if (a.cpl_engenheiro != null) pedacos.push(`CPL eng ${reais(a.cpl_engenheiro)}`);
       if (a.compras) pedacos.push(`${a.compras} compras`);
-      if (a.queimando) pedacos.push('GASTOU SEM TRAZER LEAD');
+      if (a.roas != null) pedacos.push(`ROAS ${a.roas}x`);
+      pedacos.push(a.ativo ? 'ativo' : 'pausado');
+      if (a.queimando) pedacos.push('*** GASTOU SEM TRAZER LEAD ***');
 
-      // a divisão por perfil diz que público o criativo atrai
       const perfis = colunas
         .map((c: any) => {
           const n = Number((a.respostas || {})[c.valor] || 0);
           return n ? `${c.label}: ${n}` : '';
-        })
-        .filter(Boolean);
+        }).filter(Boolean);
 
-      return `- ${a.anuncio}\n  ${pedacos.join(' | ')}`
-        + (perfis.length ? `\n  perfil dos leads — ${perfis.join(', ')}` : '');
+      return `- ${a.anuncio} (chave: ${a.chave})\n  ${pedacos.join(' | ')}`
+        + (perfis.length ? `\n  perfil dos leads - ${perfis.join(', ')}` : '');
     });
 
     return [
-      `Criativos do lancamento (${r?.resumo?.criativos || 0} no total):`,
-      r?.pergunta ? `Perfil vem da pergunta: "${r.pergunta}"` : '',
+      `Criativos (${r?.resumo?.criativos || 0} no total):`,
+      r?.pergunta ? `O perfil vem da pergunta: "${r.pergunta}"` : '',
+      Number(q.quantos)
+        ? `\nATENCAO: ${q.quantos} criativo(s) rodando sem trazer lead, `
+          + `${reais(q.gasto)} gastos.`
+        : '',
       '',
       ...linhas,
-      anuncios.length >= 25 ? '\n(mostrando os 25 com mais leads)' : '',
+      anuncios.length >= 25 ? '\n(os 25 com mais leads)' : '',
     ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'conjuntos_do_criativo') {
+    const r = await db.rpc('dash_anuncio_conjuntos', {
+      p: { chave: args?.chave || '', lancamento: lanc() },
+    });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const cs: any[] = r?.conjuntos || [];
+    if (!cs.length) return `Nenhum conjunto para o criativo "${args?.chave}".`;
+
+    return [
+      `Criativo "${r?.chave}" nos conjuntos:`,
+      '',
+      ...cs.map((c: any) => {
+        const pedacos = [
+          `${c.leads} leads`, `${c.engenheiros} engenheiros`,
+        ];
+        if (c.gasto) pedacos.push(`${reais(c.gasto)} investido`);
+        if (c.cpl_engenheiro != null) pedacos.push(`CPL eng ${reais(c.cpl_engenheiro)}`);
+        pedacos.push(c.ativo ? 'ativo' : 'pausado');
+        if (c.queimando) pedacos.push('*** GASTOU SEM TRAZER LEAD ***');
+
+        return `- ${c.conjunto}\n  ${pedacos.join(' | ')}`
+          + (c.campanha ? `\n  campanha: ${c.campanha}` : '');
+      }),
+    ].join('\n');
+  }
+
+  if (nome === 'captacao_dia_a_dia') {
+    const dias = Math.min(Math.max(Number(args?.dias) || 30, 1), 180);
+    const r = await db.rpc('dash_serie_diaria', {
+      p: { dias, lancamento: lanc() },
+    });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const dd: any[] = r?.dados || [];
+    if (!dd.length) return 'Sem dados no periodo.';
+
+    return [
+      `Captacao dia a dia (${dd.length} dias):`,
+      '',
+      ...dd.map((d: any) =>
+        `${d.dia}: ${d.leads} leads, ${d.engenheiros} engenheiros`
+        + (d.investido ? `, ${reais(d.investido)} investido` : '')
+        + (d.cpl != null ? `, CPL ${reais(d.cpl)}` : '')),
+    ].join('\n');
+  }
+
+  // ---------- leads ----------
+  if (nome === 'funil_de_leads') {
+    const r = await db.rpc('dash_grupo', { p: { lancamento: lanc() } });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const leads = Number(r?.leads || 0);
+    const taxa = (n: any) => (leads > 0 && n != null
+      ? ` (${Math.round(100 * Number(n) / leads)}% dos leads)` : '');
+
+    return [
+      'Funil da captacao:',
+      `- Leads capturados: ${num(r?.leads)}`,
+      `- Fizeram o quiz: ${num(r?.fizeram_quiz)}${taxa(r?.fizeram_quiz)}`,
+      `- Clicaram no link do grupo: ${num(r?.clicaram)}${taxa(r?.clicaram)}`,
+      `- No grupo do WhatsApp: ${num(r?.no_grupo)}`
+        + (r?.pct_no_grupo != null ? ` (${r.pct_no_grupo}% dos leads)` : ''),
+      r?.engenheiros_entraram != null
+        ? `- Engenheiros no grupo: ${r.engenheiros_entraram}` : '',
+      '',
+      'O total no grupo vem do SendFlow e conta todo mundo que esta la,',
+      'inclusive quem entrou com telefone diferente do formulario.',
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'perfil_da_base') {
+    const r = await db.rpc('perfil_da_base', { p: { lancamento: lanc() } });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const pp: any[] = r?.perguntas || [];
+    if (!pp.length) return 'Nenhuma resposta de quiz neste lancamento.';
+
+    return [
+      `Perfil da base (${r?.leads_no_lancamento || 0} leads no lancamento):`,
+      '',
+      ...pp.map((q: any) => {
+        const respostas = (q.respostas || []).map((x: any) =>
+          `    ${x.resposta}: ${x.leads} (${x.pct}%)`);
+        return `${q.pergunta}\n  ${q.responderam} responderam\n`
+          + respostas.join('\n');
+      }),
+    ].join('\n\n');
+  }
+
+  if (nome === 'buscar_lead') {
+    const r = await db.rpc('buscar_lead', { p: { busca: args?.busca || '' } });
+    if (r?.ok === false) return String(r?.erro || 'falhou');
+    if (!r?.encontrado) return String(r?.aviso || 'nenhum lead com esse contato');
+
+    const parts: any[] = r?.participacoes || [];
+    const compras: any[] = r?.compras || [];
+
+    return [
+      `${r.nome || '(sem nome)'}`,
+      `e-mail: ${r.email || '-'} | telefone: ${r.telefone || '-'}`,
+      `cadastrado em ${r.cadastrado_em || '-'}`,
+      '',
+      'Participacoes:',
+      ...parts.map((p: any) => {
+        const marcas = [
+          p.engenheiro ? 'engenheiro' : '',
+          p.fez_quiz ? 'fez o quiz' : 'nao fez o quiz',
+          p.entrou_no_grupo ? 'entrou no grupo' : 'nao entrou no grupo',
+        ].filter(Boolean);
+        const resp = p.respostas
+          ? Object.entries(p.respostas).map(([k, v]) => `${k}=${v}`).join(', ')
+          : '';
+        return `- ${p.lancamento} (${p.capturado_em}): ${marcas.join(', ')}`
+          + (p.origem ? `\n  origem: ${p.origem}` : '')
+          + (resp ? `\n  respostas: ${resp}` : '');
+      }),
+      compras.length ? '\nCompras:' : '\nNenhuma compra.',
+      ...compras.map((c: any) =>
+        `- ${c.produto} | ${reais(c.valor)} | ${c.status} | ${c.quando}`),
+    ].filter(Boolean).join('\n');
+  }
+
+  // ---------- negócio ----------
+  if (nome === 'resumo_lancamento') {
+    const r = await db.rpc('dash_resumo_lancamento', {
+      p: { lancamento: lanc() },
+    });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    return [
+      `Lancamento: ${r.lancamento || '-'}`,
+      '',
+      'Captacao:',
+      `- Leads: ${num(r.leads)}`,
+      `- Engenheiros: ${num(r.engenheiros)}`
+        + (r.pct_engenheiro != null ? ` (${r.pct_engenheiro}% do total)` : ''),
+      `- Investido: ${reais(r.investido)}`,
+      `- Custo por lead: ${reais(r.cpl)}`,
+      `- Custo por engenheiro: ${reais(r.cpl_engenheiro)}`,
+      '',
+      'Vendas:',
+      `- Vendas: ${num(r.vendas)}`,
+      `- Compradores: ${num(r.compradores)}`
+        + (r.compradores_engenheiros != null
+            ? ` (${r.compradores_engenheiros} sao engenheiros)` : ''),
+      `- Receita: ${reais(r.receita)}`,
+      `- Ticket medio: ${reais(r.ticket)}`,
+      `- Conversao: ${pct(r.conversao)}`
+        + (r.conversao_engenheiro != null
+            ? ` | entre engenheiros: ${r.conversao_engenheiro}%` : ''),
+      `- Custo por venda: ${reais(r.cpa)}`,
+      `- ROAS: ${r.roas != null ? r.roas + 'x' : '-'}`,
+      r.reembolsos ? `- Reembolsos: ${r.reembolsos} (${reais(r.valor_reembolsado)})` : '',
+      '',
+      'Resultado:',
+      `- Liquido: ${reais(r.liquido)}`,
+      `- Lucro: ${reais(r.lucro)}`,
+      `- Margem: ${pct(r.margem)}`,
+      '',
+      'Metas:',
+      r.meta_leads ? `- Leads: ${r.leads} de ${r.meta_leads}`
+        + (r.pct_meta_leads != null ? ` (${r.pct_meta_leads}%)` : '') : '',
+      r.meta_faturamento ? `- Faturamento: ${reais(r.receita)} de `
+        + `${reais(r.meta_faturamento)}`
+        + (r.pct_da_meta != null ? ` (${r.pct_da_meta}%)` : '') : '',
+      r.sem_lead ? `\n${r.sem_lead} venda(s) sem lead correspondente na base.` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'vendas') {
+    const r = await db.rpc('dash_vendas', { p: { lancamento: lanc() } });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const s = r?.resumo || {};
+    const prods: any[] = r?.produtos || [];
+    const orig: any[] = r?.origem || [];
+
+    return [
+      'Vendas do lancamento:',
+      `- Aprovadas: ${num(s.aprovadas)} | Pendentes: ${num(s.pendentes)}`,
+      `- Receita bruta: ${reais(s.bruto)} | liquida: ${reais(s.liquido)}`,
+      `- Ticket medio: ${reais(s.ticket)}`,
+      s.reembolsos ? `- Reembolsos: ${s.reembolsos} (${reais(s.valor_reembolsado)})` : '',
+      s.sem_lead ? `- Sem lead correspondente: ${s.sem_lead}` : '',
+      prods.length ? '\nPor produto:' : '',
+      ...prods.slice(0, 15).map((p: any) =>
+        `- ${p.produto || '(sem nome)'}: ${num(p.vendas)} vendas, `
+        + `${reais(p.receita)}`),
+      orig.length ? '\nDe qual criativo veio a venda:' : '',
+      ...orig.slice(0, 12).map((o: any) =>
+        `- ${o.anuncio}: ${num(o.vendas)} vendas, ${reais(o.receita)}`
+        + (o.engenheiros ? ` (${o.engenheiros} engenheiros)` : '')
+        + (o.campanha ? `\n  campanha: ${o.campanha}` : '')),
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'aulas') {
+    const r = await db.rpc('dash_aulas', { p: { lancamento: lanc() } });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const aa: any[] = r?.aulas || [];
+    if (!aa.length) return 'Nenhuma aula cadastrada neste lancamento.';
+
+    return [
+      `Aulas de ${r?.lancamento || 'este lancamento'}`
+        + (r?.comparando_com ? ` (comparado com ${r.comparando_com})` : ''),
+      '',
+      ...aa.map((a: any) => {
+        const pedacos = [];
+        if (a.views != null) pedacos.push(`${a.views} views`);
+        if (a.pico != null) pedacos.push(`pico ${a.pico}`);
+        if (a.presentes_fim != null) pedacos.push(`${a.presentes_fim} no fim`);
+        if (a.retencao_media != null) pedacos.push(`retencao ${a.retencao_media}%`);
+        if (a.segurou != null) pedacos.push(`segurou ${a.segurou}%`);
+        if (a.comentarios != null) pedacos.push(`${a.comentarios} comentarios`);
+
+        return `- ${a.titulo || a.nome || 'Aula'}: ${pedacos.join(' | ') || 'sem numeros'}`
+          + (a.anterior != null
+              ? `\n  no lancamento anterior: ${a.anterior} views` : '');
+      }),
+    ].join('\n');
+  }
+
+  // ---------- histórico e saúde ----------
+  if (nome === 'comparar_lancamentos') {
+    const r = await db.rpc('comparar_lancamentos', { p: {} });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const ll: any[] = r?.lancamentos || [];
+    if (!ll.length) return 'Nenhum lancamento com dados.';
+
+    return [
+      'Lancamentos, do mais recente ao mais antigo:',
+      '',
+      ...ll.map((l: any) => {
+        const pedacos = [
+          `${num(l.leads)} leads`,
+          `${num(l.engenheiros)} engenheiros`
+            + (l.pct_engenheiro != null ? ` (${l.pct_engenheiro}%)` : ''),
+        ];
+        if (l.investido) pedacos.push(`${reais(l.investido)} investido`);
+        if (l.cpl != null) pedacos.push(`CPL ${reais(l.cpl)}`);
+        if (l.cpl_engenheiro != null) pedacos.push(`CPL eng ${reais(l.cpl_engenheiro)}`);
+        if (l.receita) pedacos.push(`${reais(l.receita)} receita`);
+        if (l.vendas) pedacos.push(`${l.vendas} vendas`);
+        if (l.roas != null) pedacos.push(`ROAS ${l.roas}x`);
+        if (l.conversao != null) pedacos.push(`conversao ${l.conversao}%`);
+
+        return `- ${l.lancamento} (${l.comecou}, ${l.status})\n  `
+          + pedacos.join(' | ');
+      }),
+    ].join('\n');
+  }
+
+  if (nome === 'saude_da_dash') {
+    const dias = Math.min(Math.max(Number(args?.dias) || 7, 1), 90);
+
+    const [web, fone, anuncios] = await Promise.all([
+      db.rpc('diagnostico_webhooks', { p: { dias } }).catch(() => null),
+      db.rpc('leads_sem_whatsapp', { p: {} }).catch(() => null),
+      db.rpc('dash_anuncios', { p: {} }).catch(() => null),
+    ]);
+
+    const problemas: any[] = web?.problemas || [];
+    const semZap: any[] = fone?.leads || [];
+    const q = anuncios?.queimando || {};
+
+    const linhas: string[] = [];
+
+    if (problemas.length) {
+      linhas.push(`Erros de integracao nos ultimos ${dias} dias:`);
+      for (const p of problemas) {
+        linhas.push(`- ${p.quantos}x ${p.problema}`
+          + (p.custa_lead ? ' [CUSTA LEAD]' : ''));
+        if (p.o_que_fazer) linhas.push(`  ${p.o_que_fazer}`);
+      }
+    } else {
+      linhas.push(`Nenhum erro de integracao nos ultimos ${dias} dias.`);
+    }
+
+    if (Number(q.quantos)) {
+      linhas.push('');
+      linhas.push(`${q.quantos} criativo(s) rodando sem trazer lead, `
+        + `${reais(q.gasto)} gastos.`);
+    }
+
+    if (semZap.length) {
+      linhas.push('');
+      linhas.push(`${semZap.length} lead(s) com telefone que nao tem WhatsApp `
+        + '- esses nao recebem mensagem nenhuma.');
+    }
+
+    if (web?.ignorados_de_proposito) {
+      linhas.push('');
+      linhas.push(`(${web.ignorados_de_proposito} eventos ignorados de proposito, `
+        + 'que nao sao erro)');
+    }
+
+    return linhas.join('\n');
   }
 
   return `ferramenta desconhecida: ${nome}`;
@@ -4542,10 +4955,20 @@ async function mcpServidor(
   req: Request, db: Supabase, env: Env, ch: Record<string, string>,
 ): Promise<Response> {
 
-  const responder = (corpo: any, status = 200) =>
+  // A versão que o cliente pede vem no header ou no _meta, dependendo
+  // da revisão. Sem nenhuma, assume a mais antiga que atendemos.
+  const pedidaCab = req.headers.get('mcp-protocol-version') || '';
+
+  const responder = (corpo: any, status = 200, versao?: string) =>
     new Response(JSON.stringify(corpo), {
       status,
-      headers: { ...ch, 'content-type': 'application/json' },
+      headers: {
+        ...ch,
+        'content-type': 'application/json',
+        // A revisão de 2026 confere se o servidor falou a mesma língua.
+        // Sem este header o cliente pode derrubar a conexão.
+        ...(versao ? { 'mcp-protocol-version': versao } : {}),
+      },
     });
 
   // GET e DELETE não fazem parte desta revisão do transporte
@@ -4569,7 +4992,7 @@ async function mcpServidor(
 
   // A versão que o cliente pede vem no header ou no _meta, dependendo
   // da revisão. Sem nenhuma, assume a mais antiga que atendemos.
-  const pedida = req.headers.get('mcp-protocol-version')
+  const pedida = pedidaCab
     || corpo?.params?._meta?.['io.modelcontextprotocol/protocolVersion']
     || corpo?.params?.protocolVersion
     || '2025-03-26';
@@ -4579,7 +5002,7 @@ async function mcpServidor(
     : MCP_VERSOES[0];
 
   const ok = (resultado: any) =>
-    responder({ jsonrpc: '2.0', id, result: resultado });
+    responder({ jsonrpc: '2.0', id, result: resultado }, 200, versao);
 
   switch (metodo) {
     case 'initialize':
@@ -4588,9 +5011,20 @@ async function mcpServidor(
         capabilities: { tools: {} },
         serverInfo: { name: 'dash-perito', version: '1.0.0' },
         instructions:
-          'Os dados do lançamento e do Instagram do Perito da Elétrica. '
-          + 'A taxa de engajamento é sempre sobre o alcance, não sobre '
-          + 'seguidores. Só leitura: nada aqui altera a dash.',
+          'A dash do Perito da Elétrica, inteira e só leitura: nada aqui '
+          + 'altera nada. Cobre conteúdo do Instagram, tráfego pago '
+          + '(criativos e conjuntos), o funil de leads, o perfil da base, '
+          + 'vendas, aulas, a comparação entre lançamentos e a saúde das '
+          + 'integrações.\n\n'
+          + 'Duas coisas que mudam a leitura dos números: a taxa de '
+          + 'engajamento do Instagram é sobre o ALCANCE, não sobre '
+          + 'seguidores — mede se quem viu reagiu; e um criativo marcado '
+          + 'como "gastou sem trazer lead" é dinheiro saindo sem retorno, '
+          + 'vale avisar sempre que aparecer.\n\n'
+          + 'Sobre leads: buscar_lead atende um contato por vez, de '
+          + 'propósito. Não existe ferramenta que devolva a base — para '
+          + 'ver o retrato dela use perfil_da_base, que traz a '
+          + 'distribuição sem nome nem telefone.',
       });
 
     // notificação: a especificação pede 202 sem corpo
@@ -4602,7 +5036,12 @@ async function mcpServidor(
       return ok({});
 
     case 'tools/list':
-      return ok({ tools: mcpFerramentas() });
+      return ok({
+        // A área é etiqueta nossa, para a tela da dash agrupar. Cliente
+        // estrito pode recusar campo fora da especificação, então ela
+        // não vai pro fio.
+        tools: mcpFerramentas().map(({ area, ...f }) => f),
+      });
 
     case 'tools/call': {
       const nome = String(corpo?.params?.name || '');
@@ -4742,7 +5181,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v105-tutorial-conector',
+            versao: 'v106-conector-total',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5422,12 +5861,19 @@ export default {
           return jsonResponse({
             ok: true,
             url: `${url.origin}/mcp/${segredo}`,
-            ferramentas: mcpFerramentas().map((f) => ({
-              nome: f.name,
-              // a primeira frase basta para a tela; a descrição inteira
-              // é escrita para o modelo, não para a pessoa
-              resumo: String(f.description).split('. ')[0] + '.',
-            })),
+            // Treze itens em lista corrida é um muro. Agrupados por
+            // área, a pessoa vê o alcance do conector de relance.
+            areas: mcpFerramentas().reduce((acc: any[], f: any) => {
+              let g = acc.find((x) => x.area === f.area);
+              if (!g) { g = { area: f.area, ferramentas: [] }; acc.push(g); }
+              g.ferramentas.push({
+                nome: f.name,
+                // a primeira frase basta para a tela; a descrição
+                // inteira é escrita para o modelo, não para a pessoa
+                resumo: String(f.description).split('. ')[0] + '.',
+              });
+              return acc;
+            }, []),
           }, 200, ch);
         }
 
