@@ -4742,7 +4742,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v104-ig-automatico',
+            versao: 'v105-tutorial-conector',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5401,6 +5401,34 @@ export default {
           const corpo: any = await req.json().catch(() => ({}));
           const r = await db.rpc('dash_anuncio_conjuntos', { p: corpo });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        // o link do conector, pronto para colar no Claude
+        //
+        // Montado aqui e não na tela porque o segredo vive no Worker.
+        // Só quem está logado na dash chega nesta rota.
+        if (partes[1] === 'conector') {
+          const segredo = (env.MCP_SEGREDO || '').trim();
+
+          if (!segredo) {
+            return jsonResponse({
+              ok: false,
+              erro: 'o conector ainda nao foi configurado. Crie a variavel '
+                  + 'MCP_SEGREDO no Worker (Settings > Variables and Secrets, '
+                  + 'tipo Secret) com um texto longo e aleatorio.',
+            }, 200, ch);
+          }
+
+          return jsonResponse({
+            ok: true,
+            url: `${url.origin}/mcp/${segredo}`,
+            ferramentas: mcpFerramentas().map((f) => ({
+              nome: f.name,
+              // a primeira frase basta para a tela; a descrição inteira
+              // é escrita para o modelo, não para a pessoa
+              resumo: String(f.description).split('. ')[0] + '.',
+            })),
+          }, 200, ch);
         }
 
         if (partes[1] === 'ig-contas') {
