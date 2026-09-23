@@ -21,6 +21,9 @@
  */
 
 interface Env {
+  // O segredo da URL do conector MCP. Sem ele configurado a rota não
+  // existe — nada fica exposto por acidente.
+  MCP_SEGREDO?: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
   SUPABASE_ANON_KEY: string;     // valida o login da dash
@@ -4257,6 +4260,386 @@ async function igSincronizar(
   };
 }
 
+
+// =====================================================================
+// CONECTOR MCP — O CLAUDE DO CLIENTE CONSULTANDO A DASH
+//
+// O Luis pagava o Windsor.ai para levar os números do Instagram até uma
+// IA. Isto substitui: o Claude dele conecta na dash e pergunta direto,
+// sem exportar nem colar planilha.
+//
+// Só leitura. Um conector que não escreve não pode estragar nada — e a
+// URL é o segredo de acesso, então essa trava importa.
+//
+// Autenticação: o Claude aceita conector sem OAuth, então o segredo vai
+// no caminho da URL, como já acontece com os webhooks da dash. Quem tem
+// a URL tem os dados, e é por isso que ela nunca aparece em log.
+// =====================================================================
+
+/** As versões do protocolo que este servidor atende. */
+const MCP_VERSOES = [
+  '2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26',
+];
+
+/**
+ * As ferramentas que o Claude vê.
+ *
+ * Quatro, não quarenta: cada ferramenta a mais é uma escolha a mais
+ * para o modelo errar, e o caso de uso é analisar conteúdo e entender o
+ * lançamento.
+ */
+function mcpFerramentas() {
+  return [
+    {
+      name: 'posts_instagram',
+      description:
+        'Os posts do Instagram com desempenho: curtidas, comentários, '
+        + 'salvamentos, compartilhamentos, alcance, views e taxa de '
+        + 'engajamento sobre o alcance. Use para analisar que conteúdo '
+        + 'funciona e propor os próximos. O salvamento é o sinal mais '
+        + 'forte: quem salva pretende voltar.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          formato: {
+            type: 'string',
+            enum: ['REELS', 'FEED', 'STORY'],
+            description: 'Filtra por formato. Vazio traz todos.',
+          },
+          ordem: {
+            type: 'string',
+            enum: ['data', 'taxa', 'salvos', 'views', 'alcance', 'comentarios'],
+            description: 'Como ordenar. O padrão é por data.',
+          },
+          dias: {
+            type: 'integer',
+            description: 'Só os posts dos últimos N dias.',
+          },
+        },
+      },
+    },
+    {
+      name: 'analise_formatos',
+      description:
+        'Compara os formatos entre si — Reels, Feed, Stories — com views '
+        + 'médio, alcance médio, salvamentos médio e engajamento de cada. '
+        + 'Traz também os cinco posts que mais e os cinco que menos '
+        + 'engajaram. Use para decidir em que formato investir.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dias: {
+            type: 'integer',
+            description: 'Período de análise em dias. O padrão é 90.',
+          },
+        },
+      },
+    },
+    {
+      name: 'resumo_lancamento',
+      description:
+        'Como está o lançamento em andamento: leads capturados, quantos '
+        + 'são engenheiros, quantos entraram no grupo, quanto foi '
+        + 'investido, custo por lead e por engenheiro, receita e meta. '
+        + 'Use para dar contexto de negócio à análise de conteúdo.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: {
+            type: 'string',
+            description: 'O código do lançamento. Vazio usa o que está ativo.',
+          },
+        },
+      },
+    },
+    {
+      name: 'desempenho_criativos',
+      description:
+        'Os anúncios pagos por criativo: leads, engenheiros, investido, '
+        + 'custo por lead, custo por engenheiro e a divisão por resposta '
+        + 'do quiz. Use para saber que ângulo funciona no tráfego pago e '
+        + 'comparar com o que funciona no orgânico.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: {
+            type: 'string',
+            description: 'O código do lançamento. Vazio usa o que está ativo.',
+          },
+        },
+      },
+    },
+  ];
+}
+
+async function mcpChamar(
+  nome: string, args: any, db: Supabase, env: Env,
+): Promise<string> {
+
+  if (nome === 'posts_instagram') {
+    const dias = Number(args?.dias);
+    let de = '';
+    if (Number.isFinite(dias) && dias > 0) {
+      de = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+    }
+
+    const r = await db.rpc('dash_instagram', {
+      p: {
+        de, tipo: args?.formato || '',
+        ordem: args?.ordem || 'data',
+      },
+    });
+
+    if (r?.sem_conta) {
+      return 'Nenhuma conta do Instagram conectada na dash ainda. '
+        + 'Conecte em Ferramentas > Conteúdo.';
+    }
+
+    const posts: any[] = (r?.posts || []).slice(0, 40);
+    const c = r?.conta || {};
+    const s = r?.resumo || {};
+
+    // Texto, não JSON cru: o modelo lê melhor, e a legenda fica curta
+    // para a resposta não estourar.
+    const linhas = posts.map((p: any) => {
+      const pedacos = [
+        p.produto || 'FEED',
+        (p.publicado_em || '').slice(0, 10),
+        `${p.curtidas ?? 0} curtidas`,
+        `${p.comentarios ?? 0} comentarios`,
+      ];
+      if (p.salvos != null) pedacos.push(`${p.salvos} salvos`);
+      if (p.compartilhados != null) pedacos.push(`${p.compartilhados} compart`);
+      if (p.alcance != null) pedacos.push(`alcance ${p.alcance}`);
+      if (p.views != null) pedacos.push(`${p.views} views`);
+      if (p.taxa != null) pedacos.push(`engajou ${p.taxa}%`);
+
+      const legenda = String(p.legenda || '(sem legenda)')
+        .replace(/\s+/g, ' ').slice(0, 140);
+
+      return `- "${legenda}"\n  ${pedacos.join(' | ')}`;
+    });
+
+    return [
+      `Conta: @${c.username || '?'}`
+        + (c.seguidores ? ` (${c.seguidores} seguidores)` : ''),
+      `Periodo: ${s.posts || 0} posts, ${s.salvos || 0} salvamentos no total`
+        + (s.taxa_media != null ? `, engajamento medio ${s.taxa_media}%` : ''),
+      '',
+      'A taxa de engajamento e sobre o ALCANCE, nao sobre seguidores:',
+      'mede se quem viu reagiu.',
+      '',
+      ...linhas,
+      posts.length >= 40 ? '\n(mostrando os 40 primeiros)' : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'analise_formatos') {
+    const r = await db.rpc('ig_analise', { p: { dias: args?.dias || '' } });
+
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const fmt: any[] = r?.por_formato || [];
+
+    const tabela = fmt.map((f: any) =>
+      `- ${f.formato}: ${f.posts} posts | views medio ${f.views_medio} | `
+      + `alcance medio ${f.alcance_medio} | salvos medio ${f.salvos_medio} | `
+      + `engajamento ${f.taxa_media ?? '-'}%`);
+
+    const lista = (arr: any[], titulo: string) => {
+      if (!arr?.length) return '';
+      return `\n${titulo}\n` + arr.map((p: any) =>
+        `- ${p.taxa}% (${p.produto}, ${(p.publicado_em || '').slice(0, 10)}): `
+        + `"${String(p.legenda || '').replace(/\s+/g, ' ').slice(0, 120)}"`
+        + (p.salvos != null ? ` — ${p.salvos} salvos` : '')).join('\n');
+    };
+
+    return [
+      `Ultimos ${r?.dias || 90} dias, por formato:`,
+      ...tabela,
+      lista(r?.melhores, 'Os que mais engajaram:'),
+      lista(r?.piores, 'Os que menos engajaram:'),
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'resumo_lancamento') {
+    const r = await db.rpc('dash_captura', {
+      p: { lancamento: args?.lancamento || '' },
+    });
+
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const linhas = [
+      `Lancamento: ${r.nome || r.lancamento} (${r.status})`,
+      `Leads: ${r.leads ?? 0}`,
+      `Engenheiros: ${r.engenheiros ?? 0}`
+        + (r.leads ? ` (${Math.round(100 * r.engenheiros / r.leads)}% do total)` : ''),
+      r.no_grupo != null ? `No grupo do WhatsApp: ${r.no_grupo}` : '',
+      `Investido: R$ ${r.investido ?? 0}`,
+      r.cpl != null ? `Custo por lead: R$ ${r.cpl}` : '',
+      r.cpl_engenheiro != null ? `Custo por engenheiro: R$ ${r.cpl_engenheiro}` : '',
+      r.meta_leads ? `Meta de leads: ${r.meta_leads}` : '',
+      r.leads_faltantes ? `Faltam capturar: ${r.leads_faltantes}` : '',
+    ];
+
+    return linhas.filter(Boolean).join('\n');
+  }
+
+  if (nome === 'desempenho_criativos') {
+    const r = await db.rpc('dash_anuncios', {
+      p: { lancamento: args?.lancamento || '' },
+    });
+
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const anuncios: any[] = (r?.anuncios || []).slice(0, 25);
+    const colunas: any[] = r?.colunas_quiz || [];
+
+    const linhas = anuncios.map((a: any) => {
+      const pedacos = [
+        `${a.leads} leads`,
+        `${a.engenheiros} engenheiros`,
+      ];
+      if (a.gasto) pedacos.push(`R$ ${a.gasto} investido`);
+      if (a.cpl != null) pedacos.push(`CPL R$ ${a.cpl}`);
+      if (a.cpl_engenheiro != null) pedacos.push(`CPL eng R$ ${a.cpl_engenheiro}`);
+      if (a.compras) pedacos.push(`${a.compras} compras`);
+      if (a.queimando) pedacos.push('GASTOU SEM TRAZER LEAD');
+
+      // a divisão por perfil diz que público o criativo atrai
+      const perfis = colunas
+        .map((c: any) => {
+          const n = Number((a.respostas || {})[c.valor] || 0);
+          return n ? `${c.label}: ${n}` : '';
+        })
+        .filter(Boolean);
+
+      return `- ${a.anuncio}\n  ${pedacos.join(' | ')}`
+        + (perfis.length ? `\n  perfil dos leads — ${perfis.join(', ')}` : '');
+    });
+
+    return [
+      `Criativos do lancamento (${r?.resumo?.criativos || 0} no total):`,
+      r?.pergunta ? `Perfil vem da pergunta: "${r.pergunta}"` : '',
+      '',
+      ...linhas,
+      anuncios.length >= 25 ? '\n(mostrando os 25 com mais leads)' : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  return `ferramenta desconhecida: ${nome}`;
+}
+
+/**
+ * O servidor MCP.
+ *
+ * Atende tanto a revisão nova do protocolo (sem initialize, com os
+ * dados no _meta) quanto as antigas, que dependem do initialize. O
+ * Claude decide qual usar, e um servidor que só fala uma delas para de
+ * conectar quando o cliente muda.
+ */
+async function mcpServidor(
+  req: Request, db: Supabase, env: Env, ch: Record<string, string>,
+): Promise<Response> {
+
+  const responder = (corpo: any, status = 200) =>
+    new Response(JSON.stringify(corpo), {
+      status,
+      headers: { ...ch, 'content-type': 'application/json' },
+    });
+
+  // GET e DELETE não fazem parte desta revisão do transporte
+  if (req.method !== 'POST') {
+    return responder({
+      jsonrpc: '2.0',
+      error: { code: -32601, message: 'use POST' },
+    }, 405);
+  }
+
+  const corpo: any = await req.json().catch(() => null);
+  if (!corpo) {
+    return responder({
+      jsonrpc: '2.0', id: null,
+      error: { code: -32700, message: 'json invalido' },
+    }, 400);
+  }
+
+  const id = corpo.id ?? null;
+  const metodo = String(corpo.method || '');
+
+  // A versão que o cliente pede vem no header ou no _meta, dependendo
+  // da revisão. Sem nenhuma, assume a mais antiga que atendemos.
+  const pedida = req.headers.get('mcp-protocol-version')
+    || corpo?.params?._meta?.['io.modelcontextprotocol/protocolVersion']
+    || corpo?.params?.protocolVersion
+    || '2025-03-26';
+
+  const versao = MCP_VERSOES.includes(String(pedida))
+    ? String(pedida)
+    : MCP_VERSOES[0];
+
+  const ok = (resultado: any) =>
+    responder({ jsonrpc: '2.0', id, result: resultado });
+
+  switch (metodo) {
+    case 'initialize':
+      return ok({
+        protocolVersion: versao,
+        capabilities: { tools: {} },
+        serverInfo: { name: 'dash-perito', version: '1.0.0' },
+        instructions:
+          'Os dados do lançamento e do Instagram do Perito da Elétrica. '
+          + 'A taxa de engajamento é sempre sobre o alcance, não sobre '
+          + 'seguidores. Só leitura: nada aqui altera a dash.',
+      });
+
+    // notificação: a especificação pede 202 sem corpo
+    case 'notifications/initialized':
+    case 'notifications/cancelled':
+      return new Response(null, { status: 202, headers: ch });
+
+    case 'ping':
+      return ok({});
+
+    case 'tools/list':
+      return ok({ tools: mcpFerramentas() });
+
+    case 'tools/call': {
+      const nome = String(corpo?.params?.name || '');
+      try {
+        const texto = await mcpChamar(
+          nome, corpo?.params?.arguments || {}, db, env,
+        );
+        return ok({ content: [{ type: 'text', text: texto }] });
+      } catch (e: any) {
+        // erro dentro da ferramenta volta como resultado com isError,
+        // não como erro de protocolo: o modelo consegue explicar ao
+        // usuário em vez de a conversa quebrar
+        return ok({
+          content: [{
+            type: 'text',
+            text: `falhou: ${String(e?.message || e).slice(0, 300)}`,
+          }],
+          isError: true,
+        });
+      }
+    }
+
+    // pedidos que não atendemos, mas que alguns clientes fazem na
+    // abertura: devolver vazio evita erro na tela do cliente
+    case 'resources/list':
+      return ok({ resources: [] });
+    case 'prompts/list':
+      return ok({ prompts: [] });
+
+    default:
+      return responder({
+        jsonrpc: '2.0', id,
+        error: { code: -32601, message: `metodo nao atendido: ${metodo}` },
+      }, 404);
+  }
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -4331,6 +4714,26 @@ export default {
         return new Response(null, { status: 204, headers: ch });
       }
 
+      // ---- o conector MCP: /mcp/{segredo}
+      //
+      // Não passa pelo login da dash, porque o Claude não tem sessão
+      // aqui. A URL é a credencial, como nos webhooks.
+      if (partes[0] === 'mcp') {
+        const segredo = (env.MCP_SEGREDO || '').trim();
+
+        // sem segredo configurado a rota não existe: melhor 404 do que
+        // um conector aberto por esquecimento
+        if (!segredo) {
+          return new Response('nao configurado', { status: 404 });
+        }
+
+        if (partes[1] !== segredo) {
+          return new Response('nao autorizado', { status: 401 });
+        }
+
+        return mcpServidor(req, db, env, ch);
+      }
+
       if (partes[0] === 'health') {
         return jsonResponse({
           ok: true,
@@ -4339,11 +4742,12 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v102-instagram',
+            versao: 'v104-ig-automatico',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
             sellflux_endpoint: env.SELLFLUX_ENDPOINT ? 'configurado' : 'nao configurado',
+            conector_mcp: env.MCP_SEGREDO ? 'configurado' : 'nao configurado',
             // os dois destinos, para conferir de relance qual é qual
             destino_captacao: (await destinoSellflux('captacao', db, env)).fonte,
             destino_reativacao: (await destinoSellflux('reativacao', db, env)).fonte,
@@ -5524,6 +5928,33 @@ export default {
           select: 'slug',
           status: 'in.(captacao,aquecimento,evento,carrinho)',
         });
+        // ---- Instagram: duas vezes ao dia, 12h e 20h de Brasília
+        //
+        // O cron do Worker roda de hora em hora, então a escolha do
+        // horário acontece aqui. Duas vezes basta: curtida e
+        // salvamento entram devagar, e cada post custa uma chamada de
+        // insights — sincronizar de hora em hora gastaria o limite da
+        // API sem trazer número novo.
+        //
+        // 12h pega o desempenho do post da manhã; 20h fecha o dia
+        // antes da aula, que é quando o cliente olha.
+        try {
+          const agora = new Date(
+            new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }),
+          );
+          const hora = agora.getHours();
+
+          if (hora === 12 || hora === 20) {
+            const temConta = await db.select('ig_contas', {
+              select: 'id', ativa: 'is.true', limit: '1',
+            }).catch(() => null);
+
+            if (temConta?.[0]?.id) {
+              await igSincronizar({ quantos: 50 }, db, env).catch(() => {});
+            }
+          }
+        } catch (_) { /* o resto do cron não pode parar por isso */ }
+
         // A fila de reativação primeiro: ela é a única coisa aqui com
         // alguém esperando do outro lado. Cinco voltas por execução
         // dão 200 leads por hora — uma base de 10 mil sai em dois dias
