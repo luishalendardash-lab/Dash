@@ -4048,6 +4048,215 @@ function montarCsv(linhas: any[], colunas: string[]): string {
   return '\ufeff' + cabecalho + '\r\n' + corpo + '\r\n';
 }
 
+
+// =====================================================================
+// INSTAGRAM — OS NÚMEROS DO CONTEÚDO
+//
+// O que a API oficial dá e raspagem não pega: salvamentos,
+// compartilhamentos e alcance. Salvamento é o melhor sinal de conteúdo
+// que funciona — quem salva pretende voltar.
+//
+// Cada post exige uma chamada de insights à parte da listagem, então a
+// sincronização guarda no banco e a tela lê de lá.
+// =====================================================================
+
+/** As contas de Instagram que este token alcança, para o cliente escolher. */
+async function igContasDisponiveis(env: Env): Promise<any> {
+  const token = (env.META_TOKEN || '').trim();
+  if (!token) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+
+  // A conta do Instagram é alcançada pela Página do Facebook ligada a
+  // ela — não existe caminho direto pelo usuário.
+  const r = await fetch(
+    `https://graph.facebook.com/${versao}/me/accounts`
+    + `?fields=id,name,instagram_business_account{id,username,name,followers_count}`
+    + `&limit=100&access_token=${encodeURIComponent(token)}`,
+  );
+
+  const d: any = await r.json().catch(() => ({}));
+
+  if (!r.ok || d?.error) {
+    const msg = d?.error?.message || `http ${r.status}`;
+    const semPagina = /pages_|permission/i.test(msg);
+
+    return {
+      ok: false,
+      erro: semPagina
+        ? 'o token nao alcanca nenhuma Pagina. No Business Manager, atribua a '
+          + 'Pagina do Facebook e a conta do Instagram ao usuario do sistema, '
+          + 'e gere o token de novo incluindo instagram_basic, '
+          + 'instagram_manage_insights e pages_read_engagement.'
+        : msg,
+      detalhe: msg,
+    };
+  }
+
+  const contas = (d?.data || [])
+    .filter((p: any) => p?.instagram_business_account?.id)
+    .map((p: any) => ({
+      id: p.instagram_business_account.id,
+      username: p.instagram_business_account.username,
+      nome: p.instagram_business_account.name || p.name,
+      seguidores: p.instagram_business_account.followers_count ?? null,
+      pagina_id: p.id,
+      pagina_nome: p.name,
+    }));
+
+  return {
+    ok: true,
+    contas,
+    aviso: contas.length ? undefined
+      : 'as Paginas foram encontradas, mas nenhuma tem conta do Instagram '
+        + 'vinculada. A conta precisa ser Comercial ou de Criador de conteudo, '
+        + 'ligada a uma Pagina.',
+  };
+}
+
+/**
+ * Quais métricas pedir, por tipo de post.
+ *
+ * Pedir uma métrica que o tipo não tem faz o Meta recusar a chamada
+ * inteira — e aí o post fica sem número nenhum, não só sem aquele.
+ */
+function igMetricas(produto: string, tipo: string): string[] {
+  if (tipo === 'CAROUSEL_ALBUM') return [];   // álbum não tem insights
+
+  if (produto === 'STORY') {
+    return ['reach', 'views', 'shares', 'total_interactions'];
+  }
+
+  // feed e reels
+  return ['reach', 'views', 'saved', 'shares', 'total_interactions'];
+}
+
+async function igSincronizar(
+  corpo: any, db: Supabase, env: Env,
+): Promise<any> {
+  const token = (env.META_TOKEN || '').trim();
+  if (!token) return { ok: false, erro: 'META_TOKEN nao configurado' };
+
+  const versao = env.META_API_VERSAO || META_VERSAO_PADRAO;
+
+  // a conta ativa, ou a informada
+  let contaId = String(corpo?.conta_id || '').trim();
+  if (!contaId) {
+    const c = await db.select('ig_contas', {
+      select: 'id', ativa: 'is.true', limit: '1',
+    }).catch(() => null);
+    contaId = c?.[0]?.id || '';
+  }
+
+  if (!contaId) return { ok: false, erro: 'nenhuma conta do Instagram conectada' };
+
+  const quantos = Math.min(Math.max(Number(corpo?.quantos || 30), 1), 100);
+
+  // ---- a lista de posts
+  const campos = [
+    'id', 'caption', 'media_type', 'media_product_type', 'permalink',
+    'thumbnail_url', 'media_url', 'timestamp', 'like_count', 'comments_count',
+  ].join(',');
+
+  const rl = await fetch(
+    `https://graph.facebook.com/${versao}/${contaId}/media`
+    + `?fields=${campos}&limit=${quantos}`
+    + `&access_token=${encodeURIComponent(token)}`,
+  );
+
+  const dl: any = await rl.json().catch(() => ({}));
+
+  if (!rl.ok || dl?.error) {
+    return { ok: false, erro: dl?.error?.message || `http ${rl.status}` };
+  }
+
+  const midias: any[] = dl?.data || [];
+  if (!midias.length) return { ok: true, posts: 0, aviso: 'nenhum post na conta' };
+
+  // ---- os insights, em paralelo de 6
+  //
+  // Um por vez levaria 300ms cada; seis ao mesmo tempo cortam o tempo
+  // por seis, e o Worker tem limite de tempo por execução.
+  const posts: any[] = [];
+  const porVez = 6;
+
+  for (let i = 0; i < midias.length; i += porVez) {
+    const bloco = midias.slice(i, i + porVez);
+
+    await Promise.all(bloco.map(async (m: any) => {
+      const produto = m.media_product_type || 'FEED';
+      const metricas = igMetricas(produto, m.media_type || '');
+
+      const post: any = {
+        id: m.id,
+        tipo: m.media_type || null,
+        produto,
+        legenda: m.caption || null,
+        permalink: m.permalink || null,
+        thumb: m.thumbnail_url || m.media_url || null,
+        publicado_em: m.timestamp || null,
+        curtidas: m.like_count ?? null,
+        comentarios: m.comments_count ?? null,
+      };
+
+      if (!metricas.length) {
+        post.insights_erro = 'album nao tem insights';
+        posts.push(post);
+        return;
+      }
+
+      try {
+        const ri = await fetch(
+          `https://graph.facebook.com/${versao}/${m.id}/insights`
+          + `?metric=${metricas.join(',')}`
+          + `&access_token=${encodeURIComponent(token)}`,
+        );
+
+        const di: any = await ri.json().catch(() => ({}));
+
+        if (!ri.ok || di?.error) {
+          // Post recém-publicado às vezes ainda não tem número, e
+          // alguns tipos recusam métricas que a documentação diz que
+          // aceitam. Guardar o motivo evita investigar de novo depois.
+          post.insights_erro = String(di?.error?.message || `http ${ri.status}`)
+            .slice(0, 200);
+          posts.push(post);
+          return;
+        }
+
+        for (const item of (di?.data || [])) {
+          const valor = item?.values?.[0]?.value ?? null;
+          if (item.name === 'reach') post.alcance = valor;
+          if (item.name === 'views') post.views = valor;
+          if (item.name === 'saved') post.salvos = valor;
+          if (item.name === 'shares') post.compartilhados = valor;
+          if (item.name === 'total_interactions') post.interacoes = valor;
+        }
+
+        posts.push(post);
+
+      } catch (e: any) {
+        post.insights_erro = String(e?.message || e).slice(0, 200);
+        posts.push(post);
+      }
+    }));
+  }
+
+  const r = await db.rpc('ig_salvar_posts', {
+    p: { conta_id: contaId, posts },
+  });
+
+  const semInsights = posts.filter((p) => p.insights_erro).length;
+
+  return {
+    ok: true,
+    posts: posts.length,
+    novos: r?.novos || 0,
+    sem_insights: semInsights,
+    total_na_base: r?.total_na_base || 0,
+  };
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -4130,7 +4339,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v101-exportar-leads',
+            versao: 'v102-instagram',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4787,6 +4996,42 @@ export default {
         if (partes[1] === 'anuncio-conjuntos' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
           const r = await db.rpc('dash_anuncio_conjuntos', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'ig-contas') {
+          const r = await igContasDisponiveis(env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'ig-conectar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('ig_salvar_conta', { p: corpo });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'ig-sincronizar' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await igSincronizar(corpo, db, env);
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        if (partes[1] === 'instagram') {
+          const r = await db.rpc('dash_instagram', {
+            p: {
+              de: url.searchParams.get('de') || '',
+              ate: url.searchParams.get('ate') || '',
+              tipo: url.searchParams.get('tipo') || '',
+              ordem: url.searchParams.get('ordem') || 'data',
+            },
+          });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'ig-analise') {
+          const r = await db.rpc('ig_analise', {
+            p: { dias: url.searchParams.get('dias') || '' },
+          });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
