@@ -4020,6 +4020,34 @@ async function processarFilaReativacao(
   };
 }
 
+
+// =====================================================================
+// EXPORTAR LEADS EM CSV
+//
+// O escape fica aqui, num lugar só: um nome com vírgula ("Silva, João")
+// ou com aspas quebra o arquivo inteiro se for escrito cru, e o erro
+// só aparece quando alguém abre a planilha e vê as colunas trocadas.
+// =====================================================================
+function montarCsv(linhas: any[], colunas: string[]): string {
+  const campo = (v: any) => {
+    const s = v == null ? '' : String(v);
+    // Aspas sempre, não só quando "precisa": o Excel decide o tipo da
+    // célula pelo conteúdo, e um telefone ou CEP sem aspas viraria
+    // número, perdendo o zero da frente.
+    return '"' + s.replace(/"/g, '""') + '"';
+  };
+
+  const cabecalho = colunas.map(campo).join(',');
+  const corpo = linhas
+    .map((l) => colunas.map((c) => campo(l[c])).join(','))
+    .join('\r\n');
+
+  // O BOM faz o Excel ler como UTF-8. Sem ele, "Município" vira
+  // "MunicÃ­pio" — e o cliente acha que a dash corrompeu os dados.
+  // O \r\n é o que o Excel espera como fim de linha.
+  return '\ufeff' + cabecalho + '\r\n' + corpo + '\r\n';
+}
+
 // =====================================================================
 // AUTENTICAÇÃO — valida o token no próprio Supabase
 // =====================================================================
@@ -4102,7 +4130,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v100-destino-unico',
+            versao: 'v101-exportar-leads',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -4760,6 +4788,46 @@ export default {
           const corpo: any = await req.json().catch(() => ({}));
           const r = await db.rpc('dash_anuncio_conjuntos', { p: corpo });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'exportar-opcoes' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('opcoes_exportar', { p: corpo });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'exportar-previa' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('previa_exportar_leads', { p: corpo });
+          return jsonResponse(r, 200, ch);
+        }
+
+        if (partes[1] === 'exportar-csv' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('exportar_leads', { p: corpo });
+
+          if (r?.ok === false) return jsonResponse(r, 400, ch);
+
+          const leads: any[] = r?.leads || [];
+
+          // Três colunas é o padrão: a lista costuma ir para uma
+          // ferramenta de envio, e coluna a mais atrapalha o
+          // mapeamento na importação.
+          const colunas = corpo?.completo
+            ? ['nome', 'email', 'telefone', 'lancamento', 'perfil',
+               'engenheiro', 'comprou', 'capturado_em']
+            : ['nome', 'email', 'telefone'];
+
+          const csv = montarCsv(leads, colunas);
+
+          return new Response(csv, {
+            status: 200,
+            headers: {
+              ...ch,
+              'content-type': 'text/csv; charset=utf-8',
+              'x-total-leads': String(leads.length),
+            },
+          });
         }
 
         if (partes[1] === 'opcoes-segmentacao' && req.method === 'POST') {
