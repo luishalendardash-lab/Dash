@@ -2520,125 +2520,22 @@ function ehVendaHotmart(body: any): boolean {
 // Cada envio fica registrado. Quem recebeu nas últimas 24 horas não
 // entra de novo, mesmo que você clique duas vezes.
 // =====================================================================
-async function dispararRecuperacao(
-  slug: string, canal: string, ids: string[], db: Supabase, env: Env,
-  filtros?: any,
-): Promise<any> {
-  // Com filtros, a lista de alvos sai da MESMA função que desenha a
-  // tela de Recuperação. É o que garante que o disparo nunca discorde
-  // do que o cliente viu antes de clicar.
-  const plano = filtros
-    ? await db.rpc('alvos_recuperacao_motivo', {
-      p: { lancamento: slug, canal, ids, ...filtros },
-    })
-    : await db.rpc('alvos_recuperacao', {
-      p: { lancamento: slug, canal, ids },
-    });
+// =====================================================================
+// O DISPARO AUTOMÁTICO DE RECUPERAÇÃO FOI REMOVIDO
+//
+// Ele mandava o contato para o endpoint do SellFlux da CAPTAÇÃO e para
+// o fluxo do ManyChat de quem acabou de entrar no lançamento. Os dois
+// destinos existem para lead novo; recuperação passando por ali coloca
+// quem tem boleto aberto na sequência de aquecimento. Já aconteceu uma
+// vez com a reativação e não vai voltar a acontecer por um botão daqui.
+//
+// No lugar, a tela de Recuperação abre a conversa no WhatsApp com a
+// mensagem pronta do motivo (rotas /api/mensagens-recuperacao e
+// /api/contato-manual). Se um dia existirem endereços próprios de
+// recuperação no SellFlux e no ManyChat, o automático volta — com
+// destino separado, como a reativação tem hoje.
+// =====================================================================
 
-  if (plano?.ok === false) return plano;
-
-  const alvos: any[] = plano?.alvos || [];
-  if (!alvos.length) {
-    return { ok: true, enviados: 0, aviso: 'ninguem novo para enviar' };
-  }
-
-  const envios: any[] = [];
-  let enviados = 0;
-  let falhas = 0;
-
-  if (canal === 'email') {
-    const cfg = await segredoIntegracao('sellflux', 'endpoint', db);
-    const url = (cfg?.ativa && cfg?.valor) || env.SELLFLUX_ENDPOINT;
-    if (!url) {
-      return { ok: false, erro: 'SellFlux nao configurado em Integracoes' };
-    }
-
-    for (const a of alvos) {
-      try {
-        // mesmo formato do lead novo, com a tag que separa quem é
-        // recuperação — o fluxo do SellFlux se ramifica por ela
-        const corpo = new URLSearchParams({
-          name: a.nome || '',
-          email: a.email || '',
-          phone: String(a.telefone || '').replace(/\D/g, '').slice(-11),
-          ddi: '55',
-          tag: `recuperacao-${slug}`,
-          produto: a.produto || '',
-          valor: String(a.valor || ''),
-          // PIX gerado, boleto vencido e cartão recusado pedem mensagens
-          // diferentes. A tag antiga fica igual para não quebrar o fluxo
-          // que já está montado; o motivo vai num campo próprio.
-          motivo: a.motivo || '',
-        });
-
-        const r = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: corpo.toString(),
-        });
-
-        const deuCerto = r.ok;
-        if (deuCerto) enviados++; else falhas++;
-        envios.push({
-          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
-          resultado: deuCerto ? 'enviado' : 'falhou',
-          erro: deuCerto ? null : `http ${r.status}`,
-        });
-      } catch (e: any) {
-        falhas++;
-        envios.push({
-          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
-          resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
-        });
-      }
-    }
-  }
-
-  if (canal === 'whatsapp') {
-    const token = env.MANYCHAT_TOKEN || '';
-    if (!token) {
-      return { ok: false, erro: 'MANYCHAT_TOKEN nao configurado no Worker' };
-    }
-
-    for (const a of alvos) {
-      try {
-        const r = await enviarManychat(
-          { nome: a.nome, email: a.email, telefone: a.telefone, lancamento: slug },
-          {
-            token,
-            // tag própria de recuperação: a automação do ManyChat
-            // dispara por ela, sem misturar com o fluxo de lead novo
-            tag: env.MANYCHAT_TAG_RECUPERACAO || `recuperacao-${slug}`,
-            campo_lancamento: env.MANYCHAT_CAMPO || '',
-            campo_telefone: env.MANYCHAT_CAMPO_FONE || '',
-            field_id: env.MANYCHAT_FIELD_ID || '',
-          },
-        );
-
-        if (r.ok) enviados++; else falhas++;
-        envios.push({
-          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
-          resultado: r.ok ? 'enviado' : 'falhou',
-          erro: r.ok ? null : String(r.erro || '').slice(0, 200),
-        });
-      } catch (e: any) {
-        falhas++;
-        envios.push({
-          venda_id: a.venda_id, pessoa_id: a.pessoa_id, canal,
-          resultado: 'falhou', erro: String(e?.message || e).slice(0, 200),
-        });
-      }
-    }
-  }
-
-  await db.rpc('registrar_recuperacao', { p: { envios } }).catch(() => {});
-
-  return {
-    ok: true, canal, enviados, falhas,
-    total: alvos.length,
-    primeiro_erro: envios.find((e) => e.erro)?.erro,
-  };
-}
 
 
 // =====================================================================
@@ -5300,7 +5197,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v107-recuperacao-vendas',
+            versao: 'v108-whatsapp-manual',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -6201,7 +6098,10 @@ export default {
             return v ? v.split(',').map((x) => x.trim()).filter(Boolean) : [];
           };
 
-          const r = await db.rpc('recuperacao_vendas', {
+          // A lista vem pela recuperacao_lista_mensagens: é a mesma
+          // recuperacao_vendas, com a mensagem do motivo já preenchida
+          // e o telefone em dígitos para o link do WhatsApp.
+          const r = await db.rpc('recuperacao_lista_mensagens', {
             p: {
               lancamento: slug,
               motivos: lista('motivos'),
@@ -6217,19 +6117,34 @@ export default {
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
-        if (partes[1] === 'recuperar-motivo' && req.method === 'POST') {
+
+        // ---- as mensagens prontas, uma por motivo
+        if (partes[1] === 'mensagens-recuperacao' && req.method === 'GET') {
+          const r = await db.rpc('mensagens_recuperacao', { p: {} });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'mensagens-recuperacao' && req.method === 'POST') {
           const corpo: any = await req.json().catch(() => ({}));
-          const r = await dispararRecuperacao(
-            slug, corpo.canal || 'whatsapp', corpo.ids || [], db, env,
-            {
-              motivos: corpo.motivos || [],
-              plataformas: corpo.plataformas || [],
-              tudo: corpo.tudo !== false,
-              de: corpo.de || '',
-              ate: corpo.ate || '',
-            },
-          );
-          return jsonResponse(r, r.ok ? 200 : 400, ch);
+          const r = await db.rpc('salvar_mensagem_recuperacao', {
+            p: { motivo: corpo.motivo || '', texto: corpo.texto || '',
+                 quem: usuario },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        // ---- o status e o rascunho de quem chamou
+        //
+        // Manda só o campo que mudou: o `p ? 'status'` do lado do banco
+        // distingue "não mexi nisso" de "quis apagar". Mandando os dois
+        // sempre, mudar o seletor limparia a nota.
+        if (partes[1] === 'nota-recuperacao' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const p: any = { venda_id: corpo.venda_id || '' };
+          if ('status' in corpo) p.status = corpo.status ?? '';
+          if ('nota' in corpo) p.nota = corpo.nota ?? '';
+          const r = await db.rpc('salvar_nota_recuperacao', { p });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         // quem clicou no link do financiamento e nunca abriu pedido
@@ -6246,13 +6161,6 @@ export default {
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
-        if (partes[1] === 'recuperar' && req.method === 'POST') {
-          const corpo: any = await req.json().catch(() => ({}));
-          const r = await dispararRecuperacao(
-            slug, corpo.canal || 'email', corpo.ids || [], db, env,
-          );
-          return jsonResponse(r, r.ok ? 200 : 400, ch);
-        }
 
         if (partes[1] === 'historico-recuperacao') {
           const r = await db.rpc('historico_recuperacao', { p: {} });
