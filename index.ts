@@ -2862,6 +2862,1065 @@ async function subirImagem(req: Request, env: Env, ch: Record<string, string>) {
 
 
 // =====================================================================
+// PDF À MÃO
+//
+// O Worker é um arquivo único, sem nenhum `import` — é assim que ele é
+// publicado. Então não dá para usar pdf-lib nem nada de npm: o
+// certificado é escrito byte a byte aqui.
+//
+// Não é tão bravo quanto parece. Um PDF de uma página com uma imagem de
+// fundo e texto em cima são sete objetos, e as duas partes que dão
+// trabalho já estão resolvidas:
+//
+//   • A FONTE. Helvetica é uma das 14 fontes que todo leitor de PDF já
+//     tem, então não há arquivo para embutir. Declarada com
+//     /WinAnsiEncoding, ela desenha acento do português direito — é só
+//     escrever o byte certo.
+//
+//   • A IMAGEM. JPEG entra no PDF do jeito que está, sem descompactar,
+//     porque /DCTDecode é justamente "isto aqui é um JPEG". Por isso a
+//     tela de admin converte o que o cliente subir para JPEG antes de
+//     mandar: PNG com transparência exigiria desenrolar zlib e os
+//     filtros de linha aqui dentro.
+// =====================================================================
+
+// Larguras em 1/1000 do corpo, indexadas pelo byte WinAnsi a partir do
+// 32. Tiradas das métricas oficiais da fonte, não de estimativa: é o que
+// permite centralizar o nome de verdade.
+const PDF_LARG_NORMAL = [
+  278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,
+  556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,
+  722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,
+  667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,
+  556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,
+  500,334,260,334,584,0,556,0,222,556,333,1000,556,556,333,1000,667,333,
+  1000,0,611,0,0,222,222,333,333,350,556,1000,333,1000,500,333,944,0,500,
+  500,278,333,556,556,556,556,260,556,333,737,370,556,584,333,737,333,400,
+  584,333,333,333,556,537,278,333,333,365,556,834,834,834,611,667,667,667,
+  667,667,667,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,
+  778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,
+  500,556,556,556,556,278,278,278,278,556,556,556,556,556,556,556,584,611,
+  556,556,556,556,500,556,500,
+];
+
+const PDF_LARG_NEGRITO = [
+  278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,
+  556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,
+  722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,
+  667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,
+  611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,
+  500,389,280,389,584,0,556,0,278,556,500,1000,556,556,333,1000,667,333,
+  1000,0,611,0,0,278,278,500,500,350,556,1000,333,1000,556,333,944,0,500,
+  556,278,333,556,556,556,556,280,556,333,737,370,556,584,333,737,333,400,
+  584,333,333,333,611,556,278,333,333,365,556,834,834,834,611,722,722,722,
+  722,722,722,1000,722,667,667,667,667,278,278,278,278,722,722,778,778,778,
+  778,778,584,778,722,722,722,722,667,667,611,556,556,556,556,556,556,889,
+  556,556,556,556,556,278,278,278,278,611,611,611,611,611,611,611,584,611,
+  611,611,611,611,556,611,556,
+];
+
+// Os caracteres que o WinAnsi guarda de 0x80 a 0x9F. Não são Latin-1:
+// é aqui que moram travessão, aspas curvas e reticências — justamente o
+// que vem colado do Word. Sem este mapa, "Participação — 8 horas" perde
+// o travessão.
+const PDF_CP1252: Record<number, number> = {
+  0x20ac: 0x80, 0x201a: 0x82, 0x0192: 0x83, 0x201e: 0x84, 0x2026: 0x85,
+  0x2020: 0x86, 0x2021: 0x87, 0x02c6: 0x88, 0x2030: 0x89, 0x0160: 0x8a,
+  0x2039: 0x8b, 0x0152: 0x8c, 0x017d: 0x8e, 0x2018: 0x91, 0x2019: 0x92,
+  0x201c: 0x93, 0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97,
+  0x02dc: 0x98, 0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b, 0x0153: 0x9c,
+  0x017e: 0x9e, 0x0178: 0x9f,
+};
+
+/**
+ * Texto do formulário → bytes WinAnsi.
+ *
+ * Caractere que a fonte não tem (emoji, cirílico, japonês) sai como '?'
+ * em vez de sumir: um nome com um caractere estranho ainda gera o
+ * certificado, só com um '?' no lugar — melhor que erro na cara do lead
+ * que acabou de preencher.
+ */
+function pdfWinAnsi(texto: string): number[] {
+  const saida: number[] = [];
+  for (const ch of String(texto || '')) {
+    const cp = ch.codePointAt(0) || 63;
+    if (cp === 0x0a || cp === 0x0d) { saida.push(32); continue; }
+    if (cp >= 32 && cp <= 126) { saida.push(cp); continue; }
+    if (PDF_CP1252[cp] !== undefined) { saida.push(PDF_CP1252[cp]); continue; }
+    if (cp >= 0xa0 && cp <= 0xff) { saida.push(cp); continue; }
+    saida.push(63);
+  }
+  return saida;
+}
+
+/** Largura do texto em pontos, para poder centralizar e encolher. */
+function pdfLargura(texto: string, tamanho: number, negrito: boolean): number {
+  const tab = negrito ? PDF_LARG_NEGRITO : PDF_LARG_NORMAL;
+  let soma = 0;
+  for (const b of pdfWinAnsi(texto)) {
+    const i = b - 32;
+    soma += (i >= 0 && i < tab.length ? tab[i] : 500);
+  }
+  return (soma * tamanho) / 1000;
+}
+
+/**
+ * Corpo que faz o texto caber na largura pedida.
+ *
+ * Nome comprido é regra, não exceção: "Maria das Graças Nascimento
+ * Albuquerque" não cabe no mesmo corpo de "Ana Lima". Encolher é o certo
+ * — cortar com "..." num certificado é pior que feio.
+ */
+function pdfCabe(
+  texto: string, tamanho: number, maxLargura: number, negrito: boolean,
+): number {
+  let t = tamanho;
+  while (t > 6 && pdfLargura(texto, t, negrito) > maxLargura) t -= 0.5;
+  return t;
+}
+
+/** Literal de string do PDF: escapa o que quebra o parser. */
+function pdfLiteral(texto: string): string {
+  let s = '(';
+  for (const b of pdfWinAnsi(texto)) {
+    if (b === 0x28 || b === 0x29 || b === 0x5c) s += '\\' + String.fromCharCode(b);
+    else if (b < 32 || b > 126) s += '\\' + b.toString(8).padStart(3, '0');
+    else s += String.fromCharCode(b);
+  }
+  return s + ')';
+}
+
+/**
+ * Tamanho e número de canais do JPEG, lidos do marcador SOF.
+ *
+ * Precisa ser o tamanho real: /Width e /Height errados no dicionário
+ * fazem o leitor mostrar a imagem embaralhada ou recusar o arquivo.
+ */
+function pdfMedirJpeg(
+  bytes: Uint8Array,
+): { largura: number; altura: number; canais: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < bytes.length) {
+    if (bytes[i] !== 0xff) { i++; continue; }
+    const marca = bytes[i + 1];
+    // marcadores sem corpo
+    if (marca === 0xd8 || marca === 0x01 || (marca >= 0xd0 && marca <= 0xd7)) {
+      i += 2; continue;
+    }
+    const tam = (bytes[i + 2] << 8) | bytes[i + 3];
+    // SOF0 até SOF15, menos os que não são SOF (DHT c4, JPG c8, DAC cc)
+    if (marca >= 0xc0 && marca <= 0xcf
+        && marca !== 0xc4 && marca !== 0xc8 && marca !== 0xcc) {
+      return {
+        altura: (bytes[i + 5] << 8) | bytes[i + 6],
+        largura: (bytes[i + 7] << 8) | bytes[i + 8],
+        canais: bytes[i + 9],
+      };
+    }
+    if (tam < 2) return null;
+    i += 2 + tam;
+  }
+  return null;
+}
+
+type PdfTexto = {
+  texto: string;
+  // posição em % da página: 0,0 é o canto inferior esquerdo do PDF, mas
+  // aqui y é medido de cima para baixo, que é como se olha um
+  // certificado
+  x: number;
+  y: number;
+  tamanho: number;      // em % da altura da página, para escalar junto
+  negrito?: boolean;
+  cor?: [number, number, number];
+  alinhamento?: 'centro' | 'esquerda' | 'direita';
+  maxLargura?: number;  // em % da largura
+};
+
+/**
+ * Monta o PDF.
+ *
+ * Os deslocamentos da xref têm que ser exatos, então o arquivo é
+ * construído como lista de pedaços em bytes e a posição de cada objeto é
+ * contada na hora — não dá para montar string e medir depois, porque o
+ * JPEG no meio não é texto.
+ */
+function pdfMontar(opcoes: {
+  largura: number;
+  altura: number;
+  fundo?: Uint8Array | null;
+  textos: PdfTexto[];
+  titulo?: string;
+}): Uint8Array {
+  const { largura: L, altura: A } = opcoes;
+  const pedacos: Uint8Array[] = [];
+  let tamanho = 0;
+  const cru = (s: string) => {
+    // Só bytes ASCII na estrutura do PDF; texto de verdade já passou por
+    // pdfLiteral. TextEncoder daria UTF-8 e estouraria os escapes octais.
+    const b = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
+    pedacos.push(b); tamanho += b.length;
+  };
+  const bin = (b: Uint8Array) => { pedacos.push(b); tamanho += b.length; };
+
+  let img: { largura: number; altura: number; canais: number } | null = null;
+  if (opcoes.fundo && opcoes.fundo.length > 0) {
+    img = pdfMedirJpeg(opcoes.fundo);
+  }
+
+  // ---- o conteúdo da página
+  let conteudo = '';
+  if (img) {
+    // O fundo cobre a página inteira. `cm` é a matriz: escala L×A e
+    // coloca no canto. `q`/`Q` isolam para o texto não herdar a escala.
+    conteudo += `q ${L} 0 0 ${A} 0 0 cm /Im0 Do Q\n`;
+  } else {
+    // Sem fundo ainda: moldura, para o cliente já testar hoje e ver o
+    // nome no lugar antes de ter a arte pronta.
+    conteudo += `q 0.11 0.32 0.51 RG 3 w `
+      + `${(L * 0.04).toFixed(1)} ${(A * 0.06).toFixed(1)} `
+      + `${(L * 0.92).toFixed(1)} ${(A * 0.88).toFixed(1)} re S Q\n`;
+  }
+
+  for (const t of opcoes.textos) {
+    const txt = String(t.texto || '');
+    if (!txt) continue;
+    const negrito = !!t.negrito;
+    const corpoIdeal = (t.tamanho / 100) * A;
+    const maxL = ((t.maxLargura ?? 84) / 100) * L;
+    const corpo = pdfCabe(txt, corpoIdeal, maxL, negrito);
+    const larg = pdfLargura(txt, corpo, negrito);
+
+    const px = (t.x / 100) * L;
+    let x = px;
+    if ((t.alinhamento || 'centro') === 'centro') x = px - larg / 2;
+    else if (t.alinhamento === 'direita') x = px - larg;
+
+    // y vem de cima; o PDF conta de baixo. A linha de base fica um
+    // pouco abaixo do topo do texto, daí o 0.72.
+    const y = A - (t.y / 100) * A - corpo * 0.72;
+
+    const [r, g, b] = t.cor || [0.13, 0.13, 0.13];
+    conteudo += `BT /${negrito ? 'F2' : 'F1'} ${corpo.toFixed(2)} Tf `
+      + `${r} ${g} ${b} rg 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm `
+      + `${pdfLiteral(txt)} Tj ET\n`;
+  }
+
+  const contBytes = new Uint8Array(conteudo.length);
+  for (let i = 0; i < conteudo.length; i++) {
+    contBytes[i] = conteudo.charCodeAt(i) & 0xff;
+  }
+
+  // 6 fixos + a imagem, se houver + o /Info, se houver título
+  const nImg = img ? 7 : 0;
+  const nInfo = opcoes.titulo ? (img ? 8 : 7) : 0;
+  const total = Math.max(6, nImg, nInfo);
+  const pos: number[] = new Array(total + 1).fill(0);
+
+  cru('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+
+  pos[1] = tamanho;
+  cru('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+
+  pos[2] = tamanho;
+  cru('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+
+  pos[3] = tamanho;
+  cru('3 0 obj\n<< /Type /Page /Parent 2 0 R '
+    + `/MediaBox [0 0 ${L} ${A}] `
+    + '/Resources << /Font << /F1 5 0 R /F2 6 0 R >>'
+    + (img ? ' /XObject << /Im0 7 0 R >>' : '')
+    + ' >> /Contents 4 0 R >>\nendobj\n');
+
+  pos[4] = tamanho;
+  cru(`4 0 obj\n<< /Length ${contBytes.length} >>\nstream\n`);
+  bin(contBytes);
+  cru('\nendstream\nendobj\n');
+
+  pos[5] = tamanho;
+  cru('5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica '
+    + '/Encoding /WinAnsiEncoding >>\nendobj\n');
+
+  pos[6] = tamanho;
+  cru('6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold '
+    + '/Encoding /WinAnsiEncoding >>\nendobj\n');
+
+  if (img && opcoes.fundo) {
+    pos[nImg] = tamanho;
+    const espaco = img.canais === 1 ? '/DeviceGray'
+      : img.canais === 4 ? '/DeviceCMYK' : '/DeviceRGB';
+    cru(`${nImg} 0 obj\n<< /Type /XObject /Subtype /Image `
+      + `/Width ${img.largura} /Height ${img.altura} `
+      + `/ColorSpace ${espaco} /BitsPerComponent 8 /Filter /DCTDecode `
+      // JPEG CMYK gravado pelo Photoshop vem invertido; sem o /Decode a
+      // arte sai em negativo.
+      + (img.canais === 4 ? '/Decode [1 0 1 0 1 0 1 0] ' : '')
+      + `/Length ${opcoes.fundo.length} >>\nstream\n`);
+    bin(opcoes.fundo);
+    cru('\nendstream\nendobj\n');
+  }
+
+  if (nInfo) {
+    // /Info tem que ser referência indireta, não dicionário solto no
+    // trailer: leitor exigente recusa o arquivo.
+    pos[nInfo] = tamanho;
+    cru(`${nInfo} 0 obj\n<< /Title ${pdfLiteral(opcoes.titulo!)} `
+      + `/Producer ${pdfLiteral('Dash de Lancamento')} >>\nendobj\n`);
+  }
+
+  const inicioXref = tamanho;
+  let xref = `xref\n0 ${total + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= total; i++) {
+    // Hoje a numeração não deixa buraco, mas se algum objeto novo for
+    // acrescentado e ficar opcional, o que não foi escrito entra como
+    // livre. Sem isto a xref aponta para o byte 0 e o leitor acusa
+    // arquivo corrompido — erro caríssimo de achar.
+    xref += pos[i] > 0
+      ? String(pos[i]).padStart(10, '0') + ' 00000 n \n'
+      : '0000000000 65535 f \n';
+  }
+  xref += `trailer\n<< /Size ${total + 1} /Root 1 0 R`
+    + (nInfo ? ` /Info ${nInfo} 0 R` : '')
+    + ` >>\nstartxref\n${inicioXref}\n%%EOF\n`;
+  cru(xref);
+
+  const saida = new Uint8Array(tamanho);
+  let off = 0;
+  for (const p of pedacos) { saida.set(p, off); off += p.length; }
+  return saida;
+}
+
+
+// ---------------------------------------------------------------------
+// Escape de HTML do lado do servidor.
+//
+// O nome vem de um formulário público, então vai para dentro do HTML da
+// página de entrega. Sem escapar, um nome com `<` quebraria a página —
+// e no pior caso alguém escreveria script no lugar do nome.
+// ---------------------------------------------------------------------
+function escaparHtml(texto: any): string {
+  return String(texto == null ? '' : texto)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
+// =====================================================================
+// ISCAS DE ENTREGA
+//
+// Um formulário que entrega algo no fim. Dois casos hoje: o certificado,
+// que é um PDF com o nome do lead, e os slides da aula, que é um arquivo
+// fixo. O motor é o mesmo — o que muda é o `tipo` da isca.
+//
+// Rotas públicas (sem login, é um formulário aberto):
+//   GET  /i/<slug>          o formulário
+//   POST /i/<slug>          grava e devolve o link
+//   GET  /c/<codigo>        a página de download do lead
+//   GET  /c/<codigo>/pdf    o arquivo
+//
+// O PDF é montado na hora em que alguém pede, e não guardado por lead.
+// Com isso o link do Samuel na tela de admin é exatamente o mesmo
+// arquivo que o lead baixou — não uma segunda via parecida.
+// =====================================================================
+
+const MESES_PT = [
+  'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
+];
+
+/** "24 de setembro de 2026" — o formato que se escreve em certificado. */
+function dataEmPortugues(quando?: string | Date): string {
+  const d = quando ? new Date(quando) : new Date();
+  if (isNaN(d.getTime())) return '';
+  // Fuso de São Paulo. Sem isto, quem preenche às 21h vê o dia seguinte
+  // no próprio certificado, porque o Worker roda em UTC.
+  const sp = new Date(d.getTime() - 3 * 3600 * 1000);
+  return `${sp.getUTCDate()} de ${MESES_PT[sp.getUTCMonth()]} `
+    + `de ${sp.getUTCFullYear()}`;
+}
+
+/**
+ * Troca {nome}, {data}, {codigo} e o que estiver em `config.textos`.
+ *
+ * Existe para o cliente escrever as linhas do certificado pela tela, sem
+ * depender de mim para mudar "8 horas" para "12 horas".
+ */
+function trocarMarcadores(
+  texto: string, valores: Record<string, string>,
+): string {
+  return String(texto || '').replace(/\{(\w+)\}/g, (inteiro, chave) => {
+    const v = valores[String(chave).toLowerCase()];
+    return v === undefined ? inteiro : v;
+  });
+}
+
+/**
+ * Busca o fundo do certificado.
+ *
+ * Tenta duas vezes: falha de rede momentânea no R2 não pode virar
+ * certificado sem a arte, que é pior que um erro honesto — o lead
+ * guardaria um arquivo errado sem saber.
+ */
+async function buscarFundo(url: string): Promise<Uint8Array | null> {
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    try {
+      const r = await fetch(url, { cf: { cacheTtl: 3600, cacheEverything: true } } as any);
+      if (r.ok) {
+        const b = new Uint8Array(await r.arrayBuffer());
+        if (b.length > 0) return b;
+      }
+    } catch (e) { /* tenta de novo */ }
+  }
+  return null;
+}
+
+/**
+ * Monta o PDF do certificado de uma entrega.
+ *
+ * Devolve `null` quando a arte estava configurada mas não veio, para a
+ * rota responder "tente de novo" em vez de entregar um certificado
+ * quebrado.
+ */
+async function montarCertificado(
+  entrega: any,
+): Promise<{ pdf: Uint8Array | null; erro?: string }> {
+  const cfg = entrega?.isca?.config || {};
+  const nome = String(entrega?.nome || '').trim() || 'Participante';
+
+  const valores: Record<string, string> = {
+    nome,
+    data: dataEmPortugues(entrega?.criado_em),
+    codigo: String(entrega?.codigo || ''),
+    evento: String(cfg.evento || entrega?.lancamento || ''),
+    carga_horaria: String(cfg.carga_horaria || ''),
+    email: String(entrega?.email || ''),
+  };
+
+  let fundo: Uint8Array | null = null;
+  let largura = 841.89;      // A4 deitado
+  let altura = 595.28;
+
+  const fundoUrl = String(cfg.fundo_url || '').trim();
+  if (fundoUrl) {
+    fundo = await buscarFundo(fundoUrl);
+    if (!fundo) {
+      return { pdf: null, erro: 'nao consegui carregar a arte do certificado' };
+    }
+    const medida = pdfMedirJpeg(fundo);
+    if (!medida) {
+      return {
+        pdf: null,
+        erro: 'a arte do certificado nao e um JPEG valido. '
+            + 'Suba de novo pela tela de Iscas.',
+      };
+    }
+    // A página fica na forma exata da arte. Sem isto, uma arte em
+    // proporção diferente de A4 entraria esticada — e num certificado
+    // isso salta aos olhos.
+    const proporcao = medida.largura / medida.altura;
+    if (proporcao >= 1) { largura = 841.89; altura = 841.89 / proporcao; }
+    else { altura = 841.89; largura = 841.89 * proporcao; }
+  }
+
+  const textos: any[] = [];
+
+  // ---- as linhas livres, escritas pelo cliente
+  const linhas = Array.isArray(cfg.linhas) ? cfg.linhas : [];
+  for (const l of linhas) {
+    const t = trocarMarcadores(String(l?.texto || ''), valores);
+    if (!t.trim()) continue;
+    textos.push({
+      texto: t,
+      x: Number(l.x ?? 50),
+      y: Number(l.y ?? 60),
+      tamanho: Number(l.tamanho ?? 2.4),
+      negrito: !!l.negrito,
+      cor: corParaRgb(l.cor) || [0.13, 0.13, 0.13],
+      alinhamento: l.alinhamento || 'centro',
+      maxLargura: Number(l.maxLargura ?? 84),
+    });
+  }
+
+  // ---- o nome, por último para ficar sobre tudo
+  const n = cfg.nome || {};
+  textos.push({
+    texto: nome,
+    x: Number(n.x ?? 50),
+    y: Number(n.y ?? 45),
+    tamanho: Number(n.tamanho ?? 6),
+    negrito: n.negrito !== false,
+    cor: corParaRgb(n.cor) || [0.13, 0.13, 0.13],
+    alinhamento: n.alinhamento || 'centro',
+    maxLargura: Number(n.maxLargura ?? 80),
+  });
+
+  // Quando não há nada configurado ainda, o certificado sai com uma
+  // moldura e o texto padrão. É o que deixa o cliente testar o fluxo
+  // inteiro hoje, antes de a arte estar pronta.
+  if (!fundoUrl && linhas.length === 0) {
+    textos.unshift(
+      { texto: 'CERTIFICADO', x: 50, y: 17, tamanho: 4.5, negrito: true,
+        cor: [0.11, 0.32, 0.51] },
+      { texto: 'Certificamos que', x: 50, y: 33, tamanho: 2.5 },
+    );
+    textos.push(
+      { texto: valores.evento
+          ? `participou de ${valores.evento}.`
+          : 'participou do evento.',
+        x: 50, y: 58, tamanho: 2.4 },
+      { texto: valores.data, x: 50, y: 78, tamanho: 2 },
+    );
+  }
+
+  return {
+    pdf: pdfMontar({
+      largura, altura, fundo,
+      titulo: `${entrega?.isca?.nome || 'Certificado'} — ${nome}`,
+      textos,
+    }),
+  };
+}
+
+/** "#1f2937" ou "31,41,55" → [r,g,b] de 0 a 1. */
+function corParaRgb(valor: any): [number, number, number] | null {
+  const s = String(valor || '').trim();
+  if (!s) return null;
+  const hex = s.replace(/^#/, '');
+  if (/^[0-9a-f]{6}$/i.test(hex)) {
+    return [
+      parseInt(hex.slice(0, 2), 16) / 255,
+      parseInt(hex.slice(2, 4), 16) / 255,
+      parseInt(hex.slice(4, 6), 16) / 255,
+    ];
+  }
+  if (/^[0-9a-f]{3}$/i.test(hex)) {
+    return [
+      parseInt(hex[0] + hex[0], 16) / 255,
+      parseInt(hex[1] + hex[1], 16) / 255,
+      parseInt(hex[2] + hex[2], 16) / 255,
+    ];
+  }
+  const partes = s.split(/[,\s]+/).map(Number).filter((n) => !isNaN(n));
+  if (partes.length === 3) {
+    return [partes[0] / 255, partes[1] / 255, partes[2] / 255] as any;
+  }
+  return null;
+}
+
+/** Nome de arquivo que não quebra em Windows nem no WhatsApp. */
+function nomeDeArquivo(base: string, nome: string, ext: string): string {
+  const limpo = `${base}-${nome}`
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 70) || 'arquivo';
+  return `${limpo}.${ext}`;
+}
+
+// ---------------------------------------------------------------------
+// UPLOAD DO ARQUIVO DA ISCA
+//
+// Separado de `subirImagem`: aquele é do gerador de e-mail, limita a
+// 5 MB e só aceita imagem. Aqui entra o PDF dos slides, que passa
+// disso, e a arte do certificado, que precisa ser JPEG.
+// ---------------------------------------------------------------------
+const TIPOS_ISCA: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/vnd.ms-powerpoint': 'ppt',
+};
+
+const LIMITE_ISCA = 40 * 1024 * 1024;   // 40 MB
+
+async function subirArquivoIsca(
+  req: Request, env: Env, ch: Record<string, string>,
+) {
+  const faltando = [
+    !env.R2_ACCOUNT_ID && 'R2_ACCOUNT_ID',
+    !env.R2_BUCKET && 'R2_BUCKET',
+    !env.R2_ACCESS_KEY_ID && 'R2_ACCESS_KEY_ID',
+    !env.R2_SECRET_ACCESS_KEY && 'R2_SECRET_ACCESS_KEY',
+    !env.R2_PUBLICO && 'R2_PUBLICO',
+  ].filter(Boolean);
+  if (faltando.length) {
+    return jsonResponse({
+      ok: false,
+      erro: `faltam variaveis no Worker: ${faltando.join(', ')}. `
+          + 'Veja R2-IMAGENS.md.',
+    }, 400, ch);
+  }
+
+  const form = await req.formData().catch(() => null);
+  const arquivo = form?.get('arquivo');
+  if (!arquivo || typeof arquivo === 'string') {
+    return jsonResponse({ ok: false, erro: 'nenhum arquivo recebido' }, 400, ch);
+  }
+
+  const tipo = (arquivo as File).type || '';
+  const ext = TIPOS_ISCA[tipo];
+  if (!ext) {
+    return jsonResponse({
+      ok: false,
+      erro: `tipo ${tipo || 'desconhecido'} nao aceito. `
+          + 'Arte do certificado: JPG. Material para baixar: PDF, ZIP ou PPTX.',
+    }, 400, ch);
+  }
+
+  const bytes = await (arquivo as File).arrayBuffer();
+  if (bytes.byteLength > LIMITE_ISCA) {
+    return jsonResponse({
+      ok: false,
+      erro: `o arquivo tem ${(bytes.byteLength / 1048576).toFixed(1)} MB `
+          + 'e o limite e 40 MB.',
+    }, 400, ch);
+  }
+
+  // A arte do certificado vira parte de todo PDF gerado: se não for um
+  // JPEG que o gerador entende, é melhor descobrir agora do que no
+  // primeiro lead que preencher.
+  const papel = String(form?.get('papel') || '');
+  if (papel === 'fundo') {
+    const medida = pdfMedirJpeg(new Uint8Array(bytes));
+    if (!medida) {
+      return jsonResponse({
+        ok: false,
+        erro: 'nao consegui ler este JPEG. Abra a arte e salve de novo '
+            + 'como JPEG (nao progressivo), ou mande um PNG que a tela '
+            + 'converte.',
+      }, 400, ch);
+    }
+    if (medida.canais === 4) {
+      return jsonResponse({
+        ok: false,
+        erro: 'esta arte esta em CMYK. Salve em RGB, senao as cores '
+            + 'saem trocadas no certificado.',
+      }, 400, ch);
+    }
+  }
+
+  const hoje = new Date().toISOString().slice(0, 10);
+  const aleatorio = crypto.randomUUID().slice(0, 8);
+  const limpo = String((arquivo as File).name || 'arquivo')
+    .toLowerCase().replace(/\.[^.]+$/, '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'arquivo';
+
+  const caminho = `iscas/${hoje}/${limpo}-${aleatorio}.${ext}`;
+  const r = await enviarParaR2(env, caminho, bytes, tipo);
+  if (!r.ok) {
+    const dica = r.status === 403
+      ? ' — verifique se o token do R2 tem permissao de escrita neste bucket'
+      : '';
+    return jsonResponse({ ok: false, erro: `${r.erro}${dica}` }, 502, ch);
+  }
+
+  const base = (env.R2_PUBLICO || '').replace(/\/+$/, '');
+  return jsonResponse({
+    ok: true,
+    url: `${base}/${caminho}`,
+    nome: (arquivo as File).name || limpo,
+    tamanho: bytes.byteLength,
+    tipo,
+  }, 200, ch);
+}
+
+
+// ---------------------------------------------------------------------
+// Página de recado
+//
+// Link errado, arquivo que não carregou, formulário fechado. O lead está
+// do outro lado esperando o material, então o recado diz o que fazer —
+// não só que deu erro.
+// ---------------------------------------------------------------------
+function paginaAviso(titulo: string, texto: string): string {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escaparHtml(titulo)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0B0A0A;color:#fff;font-family:Jost,system-ui,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    padding:24px;text-align:center}
+  .c{max-width:420px}
+  h1{font-size:23px;font-weight:800;margin-bottom:10px;line-height:1.25}
+  p{color:#B9B3AD;font-size:15px;line-height:1.6}
+</style>
+</head>
+<body><div class="c">
+  <h1>${escaparHtml(titulo)}</h1>
+  <p>${escaparHtml(texto)}</p>
+</div></body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------
+// A PÁGINA DO FORMULÁRIO
+//
+// Serve para o lead. Vai num link que é divulgado no grupo e no e-mail,
+// então tem que abrir rápido e funcionar no celular — é onde a maioria
+// vai preencher.
+//
+// A página inteira sai daqui porque o formulário muda conforme a isca:
+// as perguntas vêm do banco, escritas pelo cliente na tela de admin.
+// ---------------------------------------------------------------------
+function paginaIsca(isca: any, base: string): string {
+  const intro = isca?.intro || {};
+  const titulo = String(intro.titulo || isca?.nome || 'Falta pouco');
+  const texto = String(intro.texto || '');
+  const botao = String(intro.botao || 'Quero receber');
+  const ehCertificado = isca?.tipo === 'certificado';
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escaparHtml(titulo)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#0B0A0A;
+    background-image:radial-gradient(circle at 20% 0%, #1C1A19 0%, transparent 60%);
+    color:#fff;font-family:Jost,system-ui,sans-serif;min-height:100vh;
+    display:flex;align-items:flex-start;justify-content:center;padding:22px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .caixa{width:100%;max-width:560px;padding:14px 0 60px}
+  h1{font-size:28px;font-weight:800;line-height:1.15;margin-bottom:10px}
+  .sub{color:#B9B3AD;font-size:16px;line-height:1.5;margin-bottom:26px}
+  .campo{margin-bottom:18px}
+  label{display:block;font-size:14px;font-weight:600;margin-bottom:7px}
+  .obr{color:#E4B33C}
+  .ajuda{font-size:13px;color:#8F8A85;margin:-3px 0 7px}
+  input[type=text],input[type=email],input[type=tel],textarea{
+    width:100%;padding:13px 14px;border-radius:10px;border:1px solid #302C29;
+    background:#151312;color:#fff;font-family:inherit;font-size:16px;
+  }
+  textarea{min-height:88px;resize:vertical}
+  input:focus,textarea:focus{outline:none;border-color:#E4B33C}
+  .ops{display:flex;flex-direction:column;gap:9px}
+  .op{
+    display:flex;align-items:center;gap:11px;padding:13px 14px;
+    border:1px solid #302C29;border-radius:10px;background:#151312;
+    cursor:pointer;font-size:16px;line-height:1.3;
+  }
+  .op:hover{border-color:#4A443F}
+  .op input{accent-color:#E4B33C;width:18px;height:18px;flex:none;margin:0}
+  .op.marcada{border-color:#E4B33C;background:#1D1915}
+  button.enviar{
+    width:100%;padding:16px;border:none;border-radius:11px;
+    background:#E4B33C;color:#1A1508;font-family:inherit;font-size:17px;
+    font-weight:700;cursor:pointer;margin-top:8px;
+  }
+  button.enviar:disabled{opacity:.55;cursor:default}
+  .erro{
+    background:#3A1714;border:1px solid #6B2A22;color:#FFB4A8;
+    padding:12px 14px;border-radius:10px;font-size:14px;margin-bottom:16px;
+    display:none;line-height:1.45;
+  }
+  .ruim{border-color:#8B3A2E !important}
+  /* ---- o fim: o que o lead veio buscar ---- */
+  #pronto{display:none;text-align:center;padding:18px 0}
+  #pronto .tique{font-size:46px;line-height:1;margin-bottom:14px}
+  #pronto h2{font-size:24px;font-weight:800;margin-bottom:8px}
+  #pronto p{color:#B9B3AD;font-size:15px;line-height:1.55;margin-bottom:22px}
+  .baixar{
+    display:block;padding:17px;border-radius:11px;background:#E4B33C;
+    color:#1A1508;font-size:17px;font-weight:700;text-decoration:none;
+    margin-bottom:14px;
+  }
+  .guarde{
+    font-size:13px;color:#8F8A85;line-height:1.5;
+    background:#141211;border:1px solid #262220;border-radius:9px;
+    padding:12px 13px;word-break:break-all;
+  }
+  .guarde a{color:#B9B3AD}
+</style>
+</head>
+<body>
+<div class="caixa">
+
+  <div id="form">
+    <h1>${escaparHtml(titulo)}</h1>
+    ${texto ? `<p class="sub">${escaparHtml(texto)}</p>` : ''}
+    <div class="erro" id="erro"></div>
+    <div id="perguntas"></div>
+    <button class="enviar" id="bt" onclick="enviar()">${escaparHtml(botao)}</button>
+  </div>
+
+  <div id="pronto">
+    <div class="tique">✓</div>
+    <h2>Pronto!</h2>
+    <p id="prontoTexto"></p>
+    <a class="baixar" id="link" href="#">Baixar agora</a>
+    <div class="guarde">
+      Guarde este link — ele abre seu arquivo sempre:<br>
+      <a id="permanente" href="#"></a>
+    </div>
+  </div>
+
+</div>
+<script>
+var ISCA = ${JSON.stringify({
+    slug: isca?.slug || '',
+    tipo: isca?.tipo || 'arquivo',
+    perguntas: isca?.perguntas || [],
+  })};
+var BASE = ${JSON.stringify(base)};
+var CERT = ${ehCertificado ? 'true' : 'false'};
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+
+function desenhar(){
+  var h = '';
+
+  // O nome é obrigatório quando é certificado: é ele que vai impresso.
+  // Nas outras iscas continua pedindo, mas sem travar quem não quer dar.
+  h += '<div class="campo"><label>Seu nome completo'
+    + (CERT ? ' <span class="obr">*</span>' : '') + '</label>'
+    + (CERT ? '<div class="ajuda">É assim que vai sair escrito no seu '
+      + 'certificado — confira antes de enviar.</div>' : '')
+    + '<input type="text" id="f_nome" autocomplete="name" '
+    + 'placeholder="Nome e sobrenome"></div>';
+
+  h += '<div class="campo"><label>Seu melhor e-mail '
+    + '<span class="obr">*</span></label>'
+    + '<input type="email" id="f_email" autocomplete="email" '
+    + 'inputmode="email" placeholder="voce@email.com"></div>';
+
+  h += '<div class="campo"><label>WhatsApp</label>'
+    + '<input type="tel" id="f_telefone" autocomplete="tel" '
+    + 'inputmode="tel" placeholder="(11) 99999-9999"></div>';
+
+  (ISCA.perguntas || []).forEach(function(q, i){
+    h += '<div class="campo" id="q_' + i + '"><label>' + esc(q.enunciado)
+      + (q.obrigatoria ? ' <span class="obr">*</span>' : '') + '</label>';
+    if (q.ajuda) h += '<div class="ajuda">' + esc(q.ajuda) + '</div>';
+
+    if (q.tipo === 'texto') {
+      h += '<textarea id="r_' + i + '" '
+        + 'placeholder="Escreva aqui"></textarea>';
+    } else {
+      var multi = q.tipo === 'multipla';
+      h += '<div class="ops">';
+      (q.opcoes || []).forEach(function(o, j){
+        h += '<label class="op" id="op_' + i + '_' + j + '">'
+          + '<input type="' + (multi ? 'checkbox' : 'radio') + '" '
+          + 'name="p' + i + '" value="' + esc(o.valor) + '" '
+          + 'data-label="' + esc(o.label || o.valor) + '" '
+          + 'onchange="marcar(' + i + ')">'
+          + '<span>' + esc(o.label || o.valor) + '</span></label>';
+      });
+      h += '</div>';
+    }
+    h += '</div>';
+  });
+
+  document.getElementById('perguntas').innerHTML = h;
+
+  // Digitar em qualquer campo apaga o aviso e a borda vermelha. Um
+  // ouvinte só, no container, em vez de um por campo.
+  document.getElementById('perguntas').addEventListener('input', function(ev){
+    document.getElementById('erro').style.display = 'none';
+    if (ev.target && ev.target.classList) ev.target.classList.remove('ruim');
+    var campo = ev.target && ev.target.closest ? ev.target.closest('.campo') : null;
+    if (campo) campo.classList.remove('ruim');
+  });
+}
+
+// Destaque de qual opção está marcada. Sem isto, no celular o toque
+// acerta o rótulo e não fica claro se pegou.
+function marcar(i){
+  var q = ISCA.perguntas[i] || {};
+  (q.opcoes || []).forEach(function(o, j){
+    var el = document.getElementById('op_' + i + '_' + j);
+    var inp = el && el.querySelector('input');
+    if (el) el.className = 'op' + (inp && inp.checked ? ' marcada' : '');
+  });
+  var campo = document.getElementById('q_' + i);
+  if (campo) campo.classList.remove('ruim');
+  // O aviso sai junto: deixar "falta responder X" na tela depois de X
+  // respondido faz a pessoa procurar erro que não existe mais.
+  document.getElementById('erro').style.display = 'none';
+}
+
+function mostrarErro(msg){
+  var e = document.getElementById('erro');
+  e.textContent = msg;
+  e.style.display = 'block';
+  e.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function enviar(){
+  var bt = document.getElementById('bt');
+  document.getElementById('erro').style.display = 'none';
+
+  // Espaço repetido some: nome colado de outro lugar costuma vir com
+  // dois, e isso ia impresso no certificado.
+  var nome = (document.getElementById('f_nome').value || '')
+    .replace(/\\s+/g, ' ').trim();
+  var email = (document.getElementById('f_email').value || '').trim();
+  var tel = (document.getElementById('f_telefone').value || '').trim();
+
+  // Exige sobrenome, e não só tamanho: "Ana" tem três letras e passaria,
+  // mas certificado com primeiro nome sozinho está errado — e é o
+  // cliente que ouve a reclamação depois.
+  if (CERT && (nome.indexOf(' ') < 0 || nome.length < 5)) {
+    document.getElementById('f_nome').classList.add('ruim');
+    return mostrarErro('Escreva nome e sobrenome — é assim que vai sair '
+      + 'no certificado.');
+  }
+  if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) {
+    document.getElementById('f_email').classList.add('ruim');
+    return mostrarErro('Confira o e-mail: parece que falta alguma coisa.');
+  }
+
+  var respostas = [];
+  for (var i = 0; i < (ISCA.perguntas || []).length; i++) {
+    var q = ISCA.perguntas[i];
+    if (q.tipo === 'texto') {
+      var v = (document.getElementById('r_' + i).value || '').trim();
+      if (v) respostas.push({ chave: q.chave, valor: v, label: v });
+      else if (q.obrigatoria) {
+        document.getElementById('q_' + i).classList.add('ruim');
+        return mostrarErro('Falta responder: ' + q.enunciado);
+      }
+    } else {
+      var marcados = document.querySelectorAll(
+        'input[name="p' + i + '"]:checked');
+      if (!marcados.length && q.obrigatoria) {
+        document.getElementById('q_' + i).classList.add('ruim');
+        return mostrarErro('Falta responder: ' + q.enunciado);
+      }
+      for (var k = 0; k < marcados.length; k++) {
+        respostas.push({
+          chave: q.chave,
+          valor: marcados[k].value,
+          label: marcados[k].getAttribute('data-label'),
+        });
+      }
+    }
+  }
+
+  bt.disabled = true;
+  bt.textContent = 'Enviando...';
+  try {
+    var r = await fetch(BASE + '/i/' + encodeURIComponent(ISCA.slug), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nome: nome, email: email, telefone: tel,
+                             respostas: respostas }),
+    });
+    var d = await r.json();
+    if (!d || !d.ok) throw new Error((d && d.erro) || 'nao deu certo');
+
+    document.getElementById('form').style.display = 'none';
+    var p = document.getElementById('pronto');
+    document.getElementById('prontoTexto').textContent = CERT
+      ? 'Seu certificado está pronto, no nome de ' + nome + '.'
+      : 'Seu material está pronto para baixar.';
+    document.getElementById('link').href = d.download;
+    document.getElementById('permanente').href = d.pagina;
+    document.getElementById('permanente').textContent = d.pagina;
+    p.style.display = 'block';
+    window.scrollTo(0, 0);
+  } catch (e) {
+    bt.disabled = false;
+    bt.textContent = ${JSON.stringify(botao)};
+    mostrarErro('Não consegui enviar: ' + (e.message || e)
+      + '. Tente de novo em instantes.');
+  }
+}
+
+desenhar();
+<\/script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------
+// A PÁGINA DO LINK PERMANENTE
+//
+// É o link que o lead guarda e o mesmo que o Samuel abre quando alguém
+// diz que não conseguiu baixar. Os dois veem o mesmo arquivo.
+// ---------------------------------------------------------------------
+function paginaEntrega(entrega: any, base: string): string {
+  const nome = String(entrega?.nome || '').trim();
+  const ehCert = entrega?.isca?.tipo === 'certificado';
+  const titulo = String(entrega?.isca?.nome || 'Seu arquivo');
+  // `/baixar` e não `/pdf`: a mesma rota serve certificado e arquivo
+  // fixo, e o fixo pode ser ZIP ou PPTX. Quando isto apontava para
+  // `/pdf`, o botão devolvia esta mesma página em vez de baixar — sem
+  // erro nenhum, só não acontecia nada.
+  const link = `${base}/c/${encodeURIComponent(entrega?.codigo || '')}/baixar`;
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escaparHtml(titulo)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#0B0A0A;color:#fff;font-family:Jost,system-ui,sans-serif;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    padding:22px;-webkit-font-smoothing:antialiased;
+  }
+  .caixa{width:100%;max-width:460px;text-align:center}
+  h1{font-size:25px;font-weight:800;margin-bottom:8px;line-height:1.2}
+  .nome{
+    font-size:17px;color:#E4B33C;font-weight:600;margin-bottom:6px;
+  }
+  p{color:#B9B3AD;font-size:15px;line-height:1.55;margin-bottom:24px}
+  a.baixar{
+    display:block;padding:17px;border-radius:11px;background:#E4B33C;
+    color:#1A1508;font-size:17px;font-weight:700;text-decoration:none;
+  }
+  .rodape{margin-top:22px;font-size:13px;color:#6F6A65;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="caixa">
+  <h1>${escaparHtml(titulo)}</h1>
+  ${nome ? `<div class="nome">${escaparHtml(nome)}</div>` : ''}
+  <p>${ehCert
+    ? 'Seu certificado está pronto. Se o nome estiver errado, '
+      + 'preencha o formulário de novo com o nome certo.'
+    : 'Toque no botão para baixar.'}</p>
+  <a class="baixar" href="${link}">Baixar${ehCert ? ' certificado' : ''}</a>
+  <div class="rodape">Este link é seu e continua funcionando.</div>
+</div>
+</body>
+</html>`;
+}
+
+
+
+// =====================================================================
 // REATIVAÇÃO DE LEADS
 //
 // Manda a base de lançamentos anteriores para uma automação do
@@ -5372,7 +6431,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v113-busca-leads',
+            versao: 'v114-iscas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5830,6 +6889,153 @@ export default {
       }
 
       // ============ API DA DASH ============
+      // ============ ISCAS: O FORMULÁRIO PÚBLICO ============
+      //
+      // Sem login de propósito: é um link que vai no grupo e no e-mail,
+      // aberto para quem preencher.
+      if (partes[0] === 'i' && partes[1]) {
+        const slugIsca = decodeURIComponent(partes[1]);
+
+        if (req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r: any = await db.rpc('isca_registrar', {
+            p: {
+              slug: slugIsca,
+              nome: corpo.nome || '',
+              email: corpo.email || '',
+              telefone: corpo.telefone || '',
+              respostas: corpo.respostas || [],
+            },
+          });
+          if (!r?.ok) return jsonResponse(r, 400, ch);
+
+          return jsonResponse({
+            ok: true,
+            pagina: `${url.origin}/c/${encodeURIComponent(r.codigo)}`,
+            download: `${url.origin}/c/${encodeURIComponent(r.codigo)}/baixar`,
+          }, 200, ch);
+        }
+
+        const isca: any = await db.rpc('isca_publica', { p: { slug: slugIsca } });
+        if (!isca?.ok) {
+          return new Response(
+            paginaAviso('Link indisponível', isca?.erro
+              || 'Este formulário não está aberto.'),
+            { status: 404, headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store',
+            } });
+        }
+        return new Response(paginaIsca(isca, url.origin), {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+
+      // ============ ISCAS: A ENTREGA ============
+      //
+      // O mesmo link serve o lead e o cliente: quando alguém diz que não
+      // conseguiu baixar, a tela de admin abre este endereço e pega o
+      // arquivo idêntico ao que o lead recebeu.
+      if (partes[0] === 'c' && partes[1]) {
+        const codigo = decodeURIComponent(partes[1]);
+        const entrega: any = await db.rpc('isca_entrega', { p: { codigo } });
+
+        if (!entrega?.ok) {
+          return new Response(
+            paginaAviso('Link não encontrado',
+              'Confira o endereço. Se você preencheu o formulário, '
+              + 'preencha de novo com o mesmo e-mail para receber o link.'),
+            { status: 404, headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store',
+            } });
+        }
+
+        if (partes[2] === 'baixar') {
+          // Contabiliza sem atrasar o download.
+          ctx.waitUntil(
+            db.rpc('isca_marcar_baixa', { p: { codigo } }).catch(() => {}));
+
+          const nomeLead = String(entrega.nome || 'participante');
+
+          // ---- arquivo fixo: repassa o do R2 com nome decente
+          if (entrega.isca?.tipo === 'arquivo') {
+            const destino = String(entrega.arquivo_url || '').trim();
+            if (!destino) {
+              return new Response(
+                paginaAviso('Arquivo ainda não publicado',
+                  'O material desta entrega ainda não foi carregado. '
+                  + 'Tente de novo mais tarde.'),
+                { status: 503, headers: {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'Cache-Control': 'no-store',
+                } });
+            }
+            const r2 = await fetch(destino).catch(() => null);
+            if (!r2 || !r2.ok) {
+              return new Response(
+                paginaAviso('Não consegui buscar o arquivo',
+                  'Tente de novo em instantes.'),
+                { status: 503, headers: {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'Cache-Control': 'no-store',
+                } });
+            }
+            // O nome do arquivo no R2 tem data e sorteio no meio. Trocar
+            // aqui é o que faz o lead baixar "slides-perito.pdf" em vez
+            // de "slides-a1b2c3d4.pdf".
+            const extR2 = (destino.match(/\.([a-z0-9]{2,5})(?:\?|$)/i)?.[1]
+              || 'pdf').toLowerCase();
+            const nomeFixo = entrega.isca?.arquivo_nome
+              || nomeDeArquivo(entrega.isca?.slug || 'material', '', extR2);
+            return new Response(r2.body, {
+              headers: {
+                'Content-Type': r2.headers.get('content-type')
+                  || 'application/octet-stream',
+                'Content-Disposition':
+                  `attachment; filename="${nomeFixo.replace(/"/g, '')}"`,
+                'Cache-Control': 'no-store',
+              },
+            });
+          }
+
+          // ---- certificado: montado agora, com o nome desta entrega
+          const feito = await montarCertificado(entrega);
+          if (!feito.pdf) {
+            return new Response(
+              paginaAviso('Não consegui montar o certificado',
+                `${feito.erro || 'erro desconhecido'}. Tente de novo em `
+                + 'instantes — seu link continua valendo.'),
+              { status: 503, headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store',
+              } });
+          }
+          // O cast é da tipagem, não do comportamento: o TypeScript novo
+          // distingue `Uint8Array<ArrayBuffer>` de `ArrayBufferLike`, e a
+          // assinatura do Response só aceita o primeiro. Um Uint8Array é
+          // corpo válido de Response pela especificação do Fetch.
+          return new Response(feito.pdf as any, {
+            headers: {
+              'Content-Type': 'application/pdf',
+              'Content-Disposition': 'attachment; filename="'
+                + nomeDeArquivo('certificado', nomeLead, 'pdf') + '"',
+              'Cache-Control': 'no-store',
+            },
+          });
+        }
+
+        return new Response(paginaEntrega(entrega, url.origin), {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+
       if (partes[0] === 'api') {
         // -------- login: o front nunca fala direto com o Supabase
         if (partes[1] === 'login' && req.method === 'POST') {
@@ -5881,6 +7087,35 @@ export default {
         // filtro de produtos vem como ?produtos=A|B|C
         const produtos = (url.searchParams.get('produtos') || '')
           .split('|').map((x) => x.trim()).filter(Boolean);
+
+        // -------- iscas de entrega (certificado, slides)
+        if (partes[1] === 'iscas' && req.method === 'GET') {
+          const r = await db.rpc('dash_iscas', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'iscas' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_isca', {
+            p: { ...corpo, lancamento: corpo.lancamento || slug },
+          });
+          return jsonResponse(r, (r as any)?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'isca-entregas' && req.method === 'GET') {
+          const r = await db.rpc('dash_isca_entregas', {
+            p: {
+              lancamento: slug,
+              slug: url.searchParams.get('isca') || '',
+              limite: Number(url.searchParams.get('limite') || 500),
+            },
+          });
+          return jsonResponse(r, (r as any)?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'isca-arquivo' && req.method === 'POST') {
+          return subirArquivoIsca(req, env, ch);
+        }
 
         // -------- lançamentos
         if (partes[1] === 'quiz' && req.method === 'GET') {
