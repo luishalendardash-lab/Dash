@@ -5372,7 +5372,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v110-tmb-checkout',
+            versao: 'v111-tmb-recusa-visivel',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5459,6 +5459,37 @@ export default {
           if (esperado) {
             const recebido = req.headers.get('x-dash-token') || '';
             if (recebido !== esperado) {
+              // Registrar a recusa não é luxo: sem isto, "ninguém se
+              // moveu no checkout" e "todos os eventos foram recusados"
+              // ficam idênticos na tela — os dois aparecem como zero
+              // evento recebido, e a diferença entre eles é um
+              // lançamento inteiro de dados perdidos.
+              //
+              // O token NÃO vai para o banco: só se ele veio, com
+              // quantos caracteres, e se bate com o segredo da URL. Isso
+              // basta para separar "header ausente" de "header errado"
+              // sem guardar segredo em tabela.
+              await db.insert('webhooks_raw', {
+                fonte: `${fonte}_header_invalido`,
+                body,
+                headers: {
+                  ...headers,
+                  'x-dash-token': recebido
+                    ? `[recebido, ${recebido.length} chars]`
+                    : '[ausente]',
+                },
+                processado: false,
+                erro: recebido
+                  ? `x-dash-token nao confere (recebi ${recebido.length} `
+                    + `chars, espero ${esperado.length}`
+                    + (recebido === secret
+                        ? '; o valor recebido é o segredo da URL, não o '
+                          + 'do header'
+                        : '')
+                    + ')'
+                  : 'x-dash-token ausente: preencha Chave e Valor nos tres '
+                    + 'webhooks da TMB',
+              }).catch(() => {});
               return jsonResponse({ ok: false, erro: 'nao autorizado' }, 401, ch);
             }
           }
