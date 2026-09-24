@@ -6,6 +6,7 @@
  *   POST /captura              formulário próprio -> banco -> SellFlux + ManyChat
  *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow, quiz)
  *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp
+ *   GET  /r/tmb/:inscricao     redirect rastreado para o financiamento TMB
  *   GET  /debug/ultimos        últimos payloads crus
  *   POST /debug/reprocessar    reprocessa o que falhou
  *
@@ -2521,10 +2522,20 @@ function ehVendaHotmart(body: any): boolean {
 // =====================================================================
 async function dispararRecuperacao(
   slug: string, canal: string, ids: string[], db: Supabase, env: Env,
+  filtros?: any,
 ): Promise<any> {
-  const plano = await db.rpc('alvos_recuperacao', {
-    p: { lancamento: slug, canal, ids },
-  });
+  // Com filtros, a lista de alvos sai da MESMA função que desenha a
+  // tela de Recuperação. É o que garante que o disparo nunca discorde
+  // do que o cliente viu antes de clicar.
+  const plano = filtros
+    ? await db.rpc('alvos_recuperacao_motivo', {
+      p: { lancamento: slug, canal, ids, ...filtros },
+    })
+    : await db.rpc('alvos_recuperacao', {
+      p: { lancamento: slug, canal, ids },
+    });
+
+  if (plano?.ok === false) return plano;
 
   const alvos: any[] = plano?.alvos || [];
   if (!alvos.length) {
@@ -2554,6 +2565,10 @@ async function dispararRecuperacao(
           tag: `recuperacao-${slug}`,
           produto: a.produto || '',
           valor: String(a.valor || ''),
+          // PIX gerado, boleto vencido e cartão recusado pedem mensagens
+          // diferentes. A tag antiga fica igual para não quebrar o fluxo
+          // que já está montado; o motivo vai num campo próprio.
+          motivo: a.motivo || '',
         });
 
         const r = await fetch(url, {
@@ -4436,6 +4451,48 @@ function mcpFerramentas() {
 
     // ---------- negócio ----------
     {
+      name: 'recuperacao_vendas',
+      area: 'leads',
+      description:
+        'Vendas que não fecharam e ainda dá para recuperar, separadas '
+        + 'por motivo: PIX aguardando, boleto gerado, boleto vencido, '
+        + 'cartão recusado, checkout abandonado, financiamento da TMB '
+        + 'incompleto, cancelada. Traz quanto dinheiro está em aberto, '
+        + 'o que fazer em cada caso e há quantos dias cada pessoa está '
+        + 'parada. Uma linha por pessoa e por produto: quem tentou pagar '
+        + 'três vezes aparece uma vez, com as outras tentativas dentro. '
+        + 'Quem acabou comprando não aparece.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: {
+            type: 'string',
+            description: 'slug do lançamento; vazio usa o ativo',
+          },
+          motivos: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'filtra por motivo. Valores: pix_aguardando, boleto_gerado, '
+              + 'boleto_vencido, pix_expirado, cartao_recusado, '
+              + 'checkout_abandonado, carrinho_abandonado, '
+              + 'financiamento_incompleto, em_analise, atrasada, '
+              + 'aguardando_pagamento, expirada, cancelada, reembolsada, '
+              + 'chargeback. Vazio traz todos.',
+          },
+          plataformas: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'hotmart, tmb, kiwify... vazio traz todas',
+          },
+          so_com_telefone: {
+            type: 'boolean',
+            description: 'só quem tem telefone, para abordagem por WhatsApp',
+          },
+        },
+      },
+    },
+    {
       name: 'resumo_lancamento',
       area: 'negócio',
       description:
@@ -4758,6 +4815,68 @@ async function mcpChamar(
       compras.length ? '\nCompras:' : '\nNenhuma compra.',
       ...compras.map((c: any) =>
         `- ${c.produto} | ${reais(c.valor)} | ${c.status} | ${c.quando}`),
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'recuperacao_vendas') {
+    const r = await db.rpc('recuperacao_vendas', {
+      p: {
+        lancamento: lanc(),
+        motivos: Array.isArray(args?.motivos) ? args.motivos : [],
+        plataformas: Array.isArray(args?.plataformas) ? args.plataformas : [],
+        so_com_telefone: !!args?.so_com_telefone,
+        limite: 120,
+      },
+    });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const tot = r?.total || {};
+    const motivos: any[] = r?.por_motivo || [];
+    const lista: any[] = r?.lista || [];
+
+    const porMotivo = motivos.map((m: any) => {
+      const pedacos = [`${m.quantos} pessoa(s)`, reais(m.valor)];
+      if (m.com_telefone != null) pedacos.push(`${m.com_telefone} com telefone`);
+      if (m.engenheiros) pedacos.push(`${m.engenheiros} engenheiros`);
+      return `- ${m.rotulo}: ${pedacos.join(' | ')}`
+        + (m.recuperavel === false ? ' [não se recupera com mensagem]' : '')
+        + `\n  o que fazer: ${m.acao}`;
+    });
+
+    const pessoas = lista.map((p: any) => {
+      const pedacos = [
+        p.rotulo,
+        reais(p.valor),
+        `há ${p.dias} dia(s)`,
+        p.plataforma,
+      ];
+      if (p.engenheiro) pedacos.push('engenheiro');
+      if (!p.telefone) pedacos.push('SEM TELEFONE');
+      if (p.tentativas > 1) pedacos.push(`${p.tentativas} tentativas`);
+      if (p.comprou_outro) pedacos.push('já comprou outro produto');
+      if (p.ja_enviado) pedacos.push(`já recebeu hoje: ${p.ja_enviado.join(', ')}`);
+
+      return `- ${p.nome || '(sem nome)'} — ${pedacos.join(' | ')}`
+        + (p.situacao ? `\n  status na plataforma: ${p.situacao}` : '');
+    });
+
+    return [
+      `Dinheiro em aberto: ${reais(tot.valor)} em ${num(tot.quantos)} pessoa(s)`,
+      `Do que vale abordagem: ${reais(tot.valor_recuperavel)} em `
+        + `${num(tot.quantos_recuperaveis)} pessoa(s)`,
+      tot.com_telefone != null
+        ? `Com telefone para WhatsApp: ${tot.com_telefone}` : '',
+      tot.sem_contato ? `Sem nenhum contato: ${tot.sem_contato}` : '',
+      '',
+      'Uma linha por pessoa e por produto. Quem acabou comprando não',
+      'está aqui — o cruzamento com as vendas aprovadas já foi feito.',
+      '',
+      'Por motivo:',
+      ...porMotivo,
+      '',
+      'As pessoas:',
+      ...pessoas,
+      lista.length >= 120 ? '\n(as 120 mais urgentes)' : '',
     ].filter(Boolean).join('\n');
   }
 
@@ -5181,7 +5300,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v106-conector-total',
+            versao: 'v107-recuperacao-vendas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5452,6 +5571,76 @@ export default {
           ctx.waitUntil(db.rpc('ingest_evento', {
             p: { inscricao_id: inscricaoId, tipo: 'grupo_click', fonte: 'interno',
                  lancamento: lanc[0].slug, payload: {} },
+          }).catch(() => {}));
+        }
+        return Response.redirect(destino, 302);
+      }
+
+      // ============ /r/tmb/:inscricao — link do financiamento ============
+      //
+      // A TMB só cria pedido quando a pessoa termina o cadastro. Quem
+      // clicou e desistiu antes disso não aparece em nenhuma API dela.
+      //
+      // Passando o link por aqui, a dash grava o clique e consegue
+      // dizer quem foi até lá e nunca começou — o ponto mais cedo em
+      // que dá para recuperar essa venda.
+      if (partes[0] === 'r' && partes[1] === 'tmb') {
+        const inscricaoId = partes[2] || url.searchParams.get('i') || '';
+
+        let lanc = inscricaoId && inscricaoId !== 'undefined'
+          ? await db.select('inscricoes', {
+            select: 'lancamento_id,lancamentos(slug,config)',
+            id: `eq.${inscricaoId}`, limit: '1',
+          }).catch(() => null)
+          : null;
+
+        let slugLanc = lanc?.[0]?.lancamentos?.slug || '';
+        let destino = lanc?.[0]?.lancamentos?.config?.financiamento_url;
+
+        // sem inscrição na URL, ou inscrição que não existe: cai no
+        // lançamento pedido por ?l= ou no ativo
+        if (!destino) {
+          const pedido = url.searchParams.get('l');
+          const l2 = pedido
+            ? await db.select('lancamentos',
+              { select: 'slug,config', slug: `eq.${pedido}`, limit: '1' })
+            : await db.select('lancamentos', {
+              select: 'slug,config',
+              status: 'in.(captacao,aquecimento,evento,carrinho)',
+              order: 'criado_em.desc', limit: '1',
+            });
+          slugLanc = l2?.[0]?.slug || slugLanc;
+          destino = l2?.[0]?.config?.financiamento_url;
+        }
+
+        if (!destino) {
+          return new Response(
+            'O link do financiamento não está cadastrado neste lançamento. '
+            + 'Configure em Recuperação de Vendas > Link do financiamento.',
+            { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+          );
+        }
+
+        destino = String(destino).trim();
+        if (!/^https?:\/\//i.test(destino)) destino = `https://${destino}`;
+
+        try {
+          new URL(destino);
+        } catch {
+          return new Response(
+            `O link cadastrado não é um endereço válido: ${destino}`,
+            { status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+          );
+        }
+
+        // O clique é gravado depois da resposta: a pessoa vai para a TMB
+        // na hora, mesmo se o banco estiver lento.
+        if (inscricaoId && inscricaoId !== 'undefined' && slugLanc) {
+          ctx.waitUntil(db.rpc('ingest_evento', {
+            p: {
+              inscricao_id: inscricaoId, tipo: 'tmb_click', fonte: 'interno',
+              lancamento: slugLanc, payload: {},
+            },
           }).catch(() => {}));
         }
         return Response.redirect(destino, 302);
@@ -5999,6 +6188,62 @@ export default {
         if (partes[1] === 'pendentes') {
           const r = await db.rpc('pagamentos_pendentes', { p: { lancamento: slug } });
           return jsonResponse(r, 200, ch);
+        }
+
+        // ---- a tela de Recuperação de Vendas
+        //
+        // Sem `tudo=false` na URL, vem tudo em aberto do lançamento sem
+        // filtro de data: boleto do carrinho anterior continua sendo
+        // dinheiro na mesa.
+        if (partes[1] === 'recuperacao') {
+          const lista = (nome: string) => {
+            const v = url.searchParams.get(nome) || '';
+            return v ? v.split(',').map((x) => x.trim()).filter(Boolean) : [];
+          };
+
+          const r = await db.rpc('recuperacao_vendas', {
+            p: {
+              lancamento: slug,
+              motivos: lista('motivos'),
+              plataformas: lista('plataformas'),
+              de: url.searchParams.get('de') || '',
+              ate: url.searchParams.get('ate') || '',
+              tudo: url.searchParams.get('tudo') !== 'false',
+              so_com_telefone: url.searchParams.get('so_com_telefone') === 'true',
+              incluir_comprou: url.searchParams.get('incluir_comprou') === 'true',
+              limite: Number(url.searchParams.get('limite') || 500),
+            },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'recuperar-motivo' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await dispararRecuperacao(
+            slug, corpo.canal || 'whatsapp', corpo.ids || [], db, env,
+            {
+              motivos: corpo.motivos || [],
+              plataformas: corpo.plataformas || [],
+              tudo: corpo.tudo !== false,
+              de: corpo.de || '',
+              ate: corpo.ate || '',
+            },
+          );
+          return jsonResponse(r, r.ok ? 200 : 400, ch);
+        }
+
+        // quem clicou no link do financiamento e nunca abriu pedido
+        if (partes[1] === 'financiamento-cliques') {
+          const r = await db.rpc('clicou_financiamento', { p: { lancamento: slug } });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        if (partes[1] === 'link-financiamento' && req.method === 'POST') {
+          const corpo: any = await req.json().catch(() => ({}));
+          const r = await db.rpc('salvar_link_financiamento', {
+            p: { lancamento: slug, url: corpo.url || '' },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         if (partes[1] === 'recuperar' && req.method === 'POST') {
