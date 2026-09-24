@@ -4382,6 +4382,14 @@ function mcpFerramentas() {
             items: { type: 'string' },
             description: 'hotmart, tmb, kiwify... vazio traz todas',
           },
+          produtos: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'filtra pelo produto que deu origem ao evento. Aceita o '
+              + 'nome como aparece na plataforma; acento e caixa não '
+              + 'importam. Vazio traz todos.',
+          },
           so_com_telefone: {
             type: 'boolean',
             description: 'só quem tem telefone, para abordagem por WhatsApp',
@@ -4721,6 +4729,7 @@ async function mcpChamar(
         lancamento: lanc(),
         motivos: Array.isArray(args?.motivos) ? args.motivos : [],
         plataformas: Array.isArray(args?.plataformas) ? args.plataformas : [],
+        produtos: Array.isArray(args?.produtos) ? args.produtos : [],
         so_com_telefone: !!args?.so_com_telefone,
         limite: 120,
       },
@@ -4757,6 +4766,9 @@ async function mcpChamar(
         + (p.situacao ? `\n  status na plataforma: ${p.situacao}` : '');
     });
 
+    const prods: any[] = (r?.opcoes?.produtos || []).map((x: any) =>
+      `- ${x.rotulo}: ${x.quantos} pessoa(s), ${reais(x.valor_aberto)}`);
+
     return [
       `Dinheiro em aberto: ${reais(tot.valor)} em ${num(tot.quantos)} pessoa(s)`,
       `Do que vale abordagem: ${reais(tot.valor_recuperavel)} em `
@@ -4768,6 +4780,9 @@ async function mcpChamar(
       'Uma linha por pessoa e por produto. Quem acabou comprando não',
       'está aqui — o cruzamento com as vendas aprovadas já foi feito.',
       '',
+      prods.length > 1 ? 'Por produto:' : '',
+      ...(prods.length > 1 ? prods : []),
+      prods.length > 1 ? '' : '',
       'Por motivo:',
       ...porMotivo,
       '',
@@ -5197,7 +5212,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v108-whatsapp-manual',
+            versao: 'v109-filtro-produto',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -6106,6 +6121,9 @@ export default {
               lancamento: slug,
               motivos: lista('motivos'),
               plataformas: lista('plataformas'),
+              // o seletor manda a chave normalizada, mas a função
+              // aceita o nome cru também
+              produtos: lista('produtos'),
               de: url.searchParams.get('de') || '',
               ate: url.searchParams.get('ate') || '',
               tudo: url.searchParams.get('tudo') !== 'false',
