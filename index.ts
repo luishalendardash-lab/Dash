@@ -5372,7 +5372,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v111-tmb-recusa-visivel',
+            versao: 'v113-busca-leads',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -6366,7 +6366,16 @@ export default {
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
-        // quem clicou no link do financiamento e nunca abriu pedido
+        // Quem clicou no link do financiamento e nunca abriu pedido.
+        //
+        // O painel disso saiu da tela: o webhook Etapas do Checkout
+        // cobre de "Seleção das Parcelas" em diante, automático, e o
+        // link rastreado exigia trocar o link da TMB em todo lugar para
+        // ganhar só a fatia de quem clicou e nem escolheu parcelamento.
+        //
+        // A rota e o /r/tmb continuam de pé: o evento tmb_click segue
+        // sendo gravado se o link for usado, e trazer o painel de volta
+        // é só tela. Apagar jogaria a capacidade fora.
         if (partes[1] === 'financiamento-cliques') {
           const r = await db.rpc('clicou_financiamento', { p: { lancamento: slug } });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
@@ -6701,29 +6710,29 @@ export default {
         }
 
         if (partes[1] === 'leads') {
-          const pagina = Math.max(0, Number(url.searchParams.get('pagina') || 0));
-          const porPagina = Math.min(100, Number(url.searchParams.get('limite') || 50));
-          const etapa = url.searchParams.get('etapa') || '';
-          const busca = url.searchParams.get('busca') || '';
-
-          const filtros: Record<string, string> = {
-            select: 'id,capturado_em,etapa,lead_score,lead_tier,engenheiro,fez_quiz,entrou_grupo,'
-                  + 'comprou,utm_campaign,utm_content,meta_ad_id,origem_sistema,'
-                  + 'pessoas(nome,email,telefone)',
-            order: 'capturado_em.desc',
-            limit: String(porPagina),
-            offset: String(pagina * porPagina),
-          };
-
-          if (slug) {
-            const lanc = await db.select('lancamentos', { select: 'id', slug: `eq.${slug}`, limit: '1' });
-            if (lanc[0]) filtros.lancamento_id = `eq.${lanc[0].id}`;
-          }
-          if (etapa) filtros.etapa = `eq.${etapa}`;
-          if (busca) filtros['pessoas.email'] = `ilike.*${busca}*`;
-
-          const dados = await db.select('inscricoes', filtros);
-          return jsonResponse({ ok: true, dados, pagina }, 200, ch);
+          // Lista e busca saem da MESMA função.
+          //
+          // Antes a lista era um select do PostgREST e a busca um filtro
+          // em coluna de tabela embutida (`pessoas.email=ilike.*x*`).
+          // Isso não filtra as inscrições: o PostgREST aplica o filtro
+          // no embutido, devolve todas as linhas e zera `pessoas` em
+          // quem não casa. O sintoma era o nome desaparecer da coluna
+          // Lead; o problema real é que a busca devolvia a lista
+          // inteira.
+          //
+          // Existe o `!inner` que consertaria, mas em SQL o filtro é
+          // comum e testável — e duas fontes de verdade para a mesma
+          // tabela foi o que criou o bug.
+          const r = await db.rpc('leads_lista', {
+            p: {
+              lancamento: slug,
+              etapa: url.searchParams.get('etapa') || '',
+              busca: url.searchParams.get('busca') || '',
+              pagina: Number(url.searchParams.get('pagina') || 0),
+              limite: Number(url.searchParams.get('limite') || 50),
+            },
+          });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
         // -------- ficha do lead
