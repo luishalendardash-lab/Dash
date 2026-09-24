@@ -4,7 +4,8 @@
  *
  * ---- ENTRADA DE DADOS ----
  *   POST /captura              formulário próprio -> banco -> SellFlux + ManyChat
- *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow, quiz)
+ *   POST /w/:fonte/:secret     webhook (hotmart, sellflux, manychat, sendflow,
+ *                              quiz, tmb, tmb-checkout, tmb-financeiro)
  *   GET  /r/grupo/:secret      redirect rastreado para o grupo de WhatsApp
  *   GET  /r/tmb/:inscricao     redirect rastreado para o financiamento TMB
  *   GET  /debug/ultimos        últimos payloads crus
@@ -63,7 +64,7 @@ interface Env {
 
 const FONTES_VALIDAS = ['sellflux', 'quiz', 'sendflow', 'manychat',
                         'hotmart', 'kiwify', 'herospark', 'guru', 'tmb',
-                        'tmb-financeiro', 'teste'];
+                        'tmb-financeiro', 'tmb-checkout', 'teste'];
 
 // =====================================================================
 // CLIENTE SUPABASE
@@ -606,8 +607,12 @@ function parseTMB(body: any, lp?: string, rawId?: number | null) {
     valor_bruto: bruto,
     valor_liquido: taxa > 0 ? Number((bruto * (1 - taxa / 100)).toFixed(2)) : 0,
     moeda: 'BRL',
+    // A TMB manda o nome em `cliente`. Sem isto o comprador de
+    // financiamento entrava na dash sem nome, e a mensagem de
+    // recuperação começava com "Oi!".
+    nome: s(achar(body, ['cliente', 'nome'])),
     email: s(achar(body, ['email'])),
-    telefone: s(achar(body, ['telefone_ativo', 'telefones'])),
+    telefone: s(achar(body, ['telefone_ativo', 'telefones', 'telefone'])),
     src: s(achar(body, ['utm_source'])),
     ocorreu_em: s(achar(body, ['data_efetivado', 'criado_em'])),
     raw: {
@@ -882,6 +887,13 @@ async function processar(
         resultado = await db.rpc('ingest_venda', { p: parseHerospark(body, lp, rawId) }); break;
       case 'tmb':
         resultado = await db.rpc('ingest_venda', { p: parseTMB(body, lp, rawId) }); break;
+      case 'tmb-checkout':
+        // As nove etapas do preenchimento do contrato. O payload vai
+        // direto para o banco: é lá que a etapa é normalizada, que os
+        // campos sensíveis são descartados e que o pedido se liga ao
+        // lead da captação.
+        resultado = await db.rpc('ingest_tmb_checkout', { p: body });
+        break;
       case 'tmb-financeiro': {
         // avisa parcela a parcela; só somamos no total pago do pedido
         const itens = Array.isArray(body) ? body : [body];
@@ -1656,11 +1668,20 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
   let total = 0;
   const pedidos: any[] = [];
 
-  // paginação: para quando a página vier menor que o tamanho pedido
-  while (pagina <= 20) {
+  // A documentação da TMB diz que pageSize é 7 por padrão e NÃO diz
+  // qual é o máximo. Pedir 100 e parar quando a página vier com menos
+  // de 100 é a receita para perder tudo em silêncio: se a API limitar
+  // em 50, a primeira página já vem "curta" e o laço para na página 1.
+  //
+  // Então o tamanho de referência é o que a PRIMEIRA página devolveu,
+  // não o que eu pedi.
+  const pedido = 100;
+  let porPagina = 0;
+
+  while (pagina <= 60) {
     const qs = new URLSearchParams({
       pageNumber: String(pagina),
-      pageSize: '100',
+      pageSize: String(pedido),
       data_inicio: fmt(de),
       data_final: fmt(ate),
     });
@@ -1678,12 +1699,34 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
     if (!lote.length) break;
 
     pedidos.push(...lote);
-    if (lote.length < 100) break;
+
+    if (porPagina === 0) porPagina = lote.length;
+    // acabou quando a página veio menor que o tamanho que a API mostrou
+    // que usa de verdade
+    if (lote.length < porPagina) break;
     pagina++;
   }
 
+  // Se parei no teto de páginas, provavelmente tem mais — e calar isso
+  // faz o cliente olhar um número incompleto achando que é o total.
+  const truncou = pagina > 60;
+
   for (const p of pedidos) {
-    const bruto = Number(p.valor_total || 0);
+    // O que o produtor fatura é o ticket, não o contrato financiado.
+    //
+    // Os webhooks mandam `valor_principal`; a api/pedidos NÃO manda —
+    // ela só tem `valor_total`, que é o contrato com juros e chega a
+    // ser várias vezes maior. Então: se a venda já existe (veio por
+    // webhook, com o principal), a sincronia não mexe no valor. Se é
+    // nova e só tem o total, entra com o total e fica marcada no raw
+    // para o número não passar por certo sem ninguém saber.
+    const principal = Number(p.valor_principal || 0);
+    // `contrato` e não `total`: já existe um `total` contando os
+    // pedidos gravados neste laço, e sombrear ele é como se perde uma
+    // hora procurando o número errado.
+    const contrato = Number(p.valor_total || 0);
+    const bruto = principal > 0 ? principal : contrato;
+    const soTemTotal = principal <= 0 && contrato > 0;
     const taxa = Number(p.taxa_administracao || 0);
     const situacao = String(p.status_pedido || '').toLowerCase();
 
@@ -1708,11 +1751,26 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
           valor_bruto: bruto,
           valor_liquido: taxa > 0 ? Number((bruto * (1 - taxa / 100)).toFixed(2)) : 0,
           moeda: 'BRL',
+          nome: p.cliente || p.nome || null,
           email: p.email || null,
-          telefone: p.telefone || null,
+          telefone: p.telefone || p.telefone_ativo || p.telefones || null,
           src: p.utm_source || null,
           ocorreu_em: p.data_efetivado || p.criado_em || null,
-          raw: p,
+          // CPF, score de crédito, probabilidade de inadimplência e
+          // nascimento não são guardados: nada disso serve para
+          // recuperar venda, e guardar transforma um vazamento em
+          // problema grave.
+          raw: (() => {
+            const {
+              documento, score, probabilidade_inadimplencia, nascimento,
+              avalista_documento, avalista_score, avalista_data_nascimento,
+              probabilidade_inadimplencia_avalista,
+              ...limpo
+            } = p as any;
+            return soTemTotal
+              ? { ...limpo, _valor_e_o_contrato_financiado: true }
+              : limpo;
+          })(),
         },
       });
       total++;
@@ -1720,7 +1778,14 @@ async function sincronizarTMB(dias: number, db: Supabase, env: Env): Promise<any
   }
 
   await db.rpc('reconciliar_vendas', { p: {} }).catch(() => {});
-  return { ok: true, pedidos: pedidos.length, gravados: total };
+  return {
+    ok: true, pedidos: pedidos.length, gravados: total,
+    por_pagina: porPagina,
+    aviso: truncou
+      ? `parei em 60 páginas de ${porPagina}; pode ter mais pedido no `
+        + 'período. Sincronize um intervalo menor.'
+      : undefined,
+  };
 }
 
 // =====================================================================
@@ -4398,6 +4463,30 @@ function mcpFerramentas() {
       },
     },
     {
+      name: 'checkout_tmb',
+      area: 'leads',
+      description:
+        'O funil das nove etapas do financiamento da TMB: Seleção das '
+        + 'Parcelas, Token, Prova de Vida, Início da Documentação, Anexo '
+        + 'do Documento, Anexo de Selfie, Anexo do Comprovante de '
+        + 'Endereço, Aguardando Assinatura, Aguardando Pagamento. Diz '
+        + 'quantos passaram por cada etapa e quantos estão parados em '
+        + 'cada uma agora, com o dinheiro preso em cada ponto. Use para '
+        + 'descobrir ONDE o financiamento perde gente — se a queda está '
+        + 'na selfie, o problema é a selfie, não o preço. A TMB não '
+        + 'avisa quem foi reprovado na análise de crédito: quem sai sem '
+        + 'efetivar aparece parado na última etapa que alcançou.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lancamento: {
+            type: 'string',
+            description: 'slug do lançamento; vazio usa o ativo',
+          },
+        },
+      },
+    },
+    {
       name: 'resumo_lancamento',
       area: 'negócio',
       description:
@@ -4789,6 +4878,77 @@ async function mcpChamar(
       'As pessoas:',
       ...pessoas,
       lista.length >= 120 ? '\n(as 120 mais urgentes)' : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  if (nome === 'checkout_tmb') {
+    const r = await db.rpc('dash_tmb_checkout', { p: { lancamento: lanc() } });
+    if (r?.ok === false) return String(r?.erro || 'sem dados');
+
+    const s = r?.resumo || {};
+    if (!Number(s.pedidos)) {
+      return 'Nenhum pedido da TMB neste lançamento. Se era esperado, o '
+        + 'webhook Etapas do Checkout pode não estar ligado na TMB.';
+    }
+
+    const etapas: any[] = r?.etapas || [];
+    const parados: any[] = r?.parados || [];
+
+    const funil = etapas.map((e: any, i: number) => {
+      const ant = i > 0 ? Number(etapas[i - 1].chegaram) : null;
+      const ch = Number(e.chegaram) || 0;
+      const caiu = ant && ant > 0 && ch < ant
+        ? ` [caiu ${Math.round(100 * (ant - ch) / ant)}% da etapa anterior]`
+        : '';
+      return `${e.ordem}. ${e.fase}: ${ch} chegaram`
+        + (Number(e.parados)
+            ? `, ${e.parados} parados aqui (${reais(e.valor_parado)})`
+            : '')
+        + caiu;
+    });
+
+    const fila = parados.slice(0, 40).map((p: any) => {
+      const h = Number(p.horas_parado);
+      const tempo = Number.isFinite(h)
+        ? (h < 24 ? `${h}h` : `${Math.round(h / 24)} dia(s)`)
+        : '?';
+      return `- ${p.nome || p.email || '(sem nome)'} — etapa ${p.ordem} `
+        + `(${p.fase}), parado há ${tempo}, ${reais(p.valor)}`
+        + (p.tem_boleto ? ' [boleto de entrada já emitido]' : '')
+        + (p.telefone ? '' : ' [SEM TELEFONE]');
+    });
+
+    return [
+      `Pedidos na TMB: ${num(s.pedidos)}`,
+      `Em andamento: ${num(s.em_andamento)} (${reais(s.valor_em_andamento)})`,
+      `Assinaram e não pagaram a entrada: ${num(s.assinaram_sem_pagar)} `
+        + `(${reais(s.valor_assinado_sem_pagar)})`,
+      Number(s.com_boleto_em_maos)
+        ? `Desses, ${s.com_boleto_em_maos} já têm o boleto emitido — é o `
+          + 'grupo mais fácil de recuperar.'
+        : '',
+      `Efetivados: ${num(s.efetivados)} (${reais(s.faturado)} faturado)`,
+      `Recebido de parcela até agora: ${reais(s.recebido)}`,
+      Number(s.etapa_desconhecida)
+        ? `\nATENÇÃO: ${s.etapa_desconhecida} pedido(s) numa etapa que a `
+          + 'dash não conhece, fora do funil abaixo.'
+        : '',
+      r?.funil_incompleto
+        ? '\nO funil tem etapa de baixo com mais gente que a de cima: o '
+          + 'webhook foi ligado com pedidos já em andamento, então as '
+          + 'etapas iniciais estão subcontadas.'
+        : '',
+      '',
+      // A nota vai no corpo, não só na descrição da ferramenta: sem ela
+      // o modelo lê "nenhum reprovado" no silêncio dos dados e conclui
+      // que o financiamento não reprova ninguém.
+      r?.nota ? String(r.nota) : '',
+      '',
+      'O funil, etapa por etapa:',
+      ...funil,
+      parados.length ? '\nQuem está parado agora:' : '',
+      ...fila,
+      parados.length > 40 ? `\n(os 40 primeiros de ${parados.length})` : '',
     ].filter(Boolean).join('\n');
   }
 
@@ -5212,7 +5372,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v109-filtro-produto',
+            versao: 'v110-tmb-checkout',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -5289,7 +5449,11 @@ export default {
         // descobrir a URL poderia inventar vendas no seu faturamento.
         // A TMB deixa você escolher o nome e o valor do header de
         // autenticação. Usamos x-dash-token com o mesmo segredo da URL.
-        if (fonte === 'tmb' || fonte === 'tmb-financeiro') {
+        //
+        // startsWith cobre os três de uma vez: tmb, tmb-financeiro e
+        // tmb-checkout. Listar um por um deixaria de fora justamente o
+        // que eu acabei de acrescentar.
+        if (fonte.startsWith('tmb')) {
           const guardado = await segredoIntegracao('tmb', 'header_valor', db);
           const esperado = guardado?.valor || '';
           if (esperado) {
@@ -6162,6 +6326,12 @@ export default {
           if ('status' in corpo) p.status = corpo.status ?? '';
           if ('nota' in corpo) p.nota = corpo.nota ?? '';
           const r = await db.rpc('salvar_nota_recuperacao', { p });
+          return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
+        }
+
+        // ---- o funil das nove etapas do checkout da TMB
+        if (partes[1] === 'tmb-checkout') {
+          const r = await db.rpc('dash_tmb_checkout', { p: { lancamento: slug } });
           return jsonResponse(r, r?.ok === false ? 400 : 200, ch);
         }
 
