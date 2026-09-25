@@ -3569,18 +3569,24 @@ function paginaAviso(titulo: string, texto: string): string {
 // ---------------------------------------------------------------------
 // A PÁGINA DO FORMULÁRIO
 //
-// Serve para o lead. Vai num link que é divulgado no grupo e no e-mail,
-// então tem que abrir rápido e funcionar no celular — é onde a maioria
-// vai preencher.
+// Uma pergunta por tela, como o widget do quiz já faz e como o Tally
+// fazia — e não por gosto: o form dos slides tem o mockup da oferta e um
+// bloco de copy no meio, e tudo numa rolagem só vira um paredão que a
+// pessoa abandona.
 //
-// A página inteira sai daqui porque o formulário muda conforme a isca:
-// as perguntas vêm do banco, escritas pelo cliente na tela de admin.
+// Uma tela por pergunta também é o que torna a ramificação possível: a
+// pergunta que só existe para quem respondeu B aparece depois de B, e
+// não pisca no meio da página.
+//
+// A tela final vem do servidor no envio, não daqui. Um dos desfechos
+// carrega o link de pagamento, e mandar os desfechos junto com o
+// formulário poria a oferta no código-fonte antes de a pessoa responder.
 // ---------------------------------------------------------------------
 function paginaIsca(isca: any, base: string): string {
   const intro = isca?.intro || {};
   const titulo = String(intro.titulo || isca?.nome || 'Falta pouco');
   const texto = String(intro.texto || '');
-  const botao = String(intro.botao || 'Quero receber');
+  const botao = String(intro.botao || 'Começar');
   const ehCertificado = isca?.tipo === 'certificado';
 
   return `<!DOCTYPE html>
@@ -3603,254 +3609,359 @@ function paginaIsca(isca: any, base: string): string {
     -webkit-font-smoothing:antialiased;
   }
   .caixa{width:100%;max-width:560px;padding:14px 0 60px}
-  h1{font-size:28px;font-weight:800;line-height:1.15;margin-bottom:10px}
-  .sub{color:#B9B3AD;font-size:16px;line-height:1.5;margin-bottom:26px}
-  .campo{margin-bottom:18px}
+
+  .barra{height:3px;background:#221F1D;border-radius:99px;margin-bottom:18px}
+  .barra i{
+    display:block;height:100%;background:#E4B33C;border-radius:99px;
+    transition:width .3s;
+  }
+  .passo{font-size:12px;color:#7E7873;margin-bottom:16px;letter-spacing:.02em}
+
+  h1{font-size:27px;font-weight:800;line-height:1.16;margin-bottom:10px}
+  .sub{color:#B9B3AD;font-size:16px;line-height:1.55;margin-bottom:26px}
+  /* o bloco de copy que vem antes da pergunta */
+  .antes{
+    color:#C8C2BC;font-size:15px;line-height:1.6;margin-bottom:18px;
+    white-space:pre-line;
+  }
+  .imagem{
+    width:100%;border-radius:12px;margin-bottom:18px;display:block;
+    border:1px solid #2A2724;
+  }
+  .pergunta{font-size:21px;font-weight:700;line-height:1.3;margin-bottom:8px}
+  .ajuda{font-size:13.5px;color:#8F8A85;margin-bottom:16px;line-height:1.5}
+
+  .campo{margin-bottom:16px}
   label{display:block;font-size:14px;font-weight:600;margin-bottom:7px}
   .obr{color:#E4B33C}
-  .ajuda{font-size:13px;color:#8F8A85;margin:-3px 0 7px}
   input[type=text],input[type=email],input[type=tel],textarea{
     width:100%;padding:13px 14px;border-radius:10px;border:1px solid #302C29;
     background:#151312;color:#fff;font-family:inherit;font-size:16px;
   }
-  textarea{min-height:88px;resize:vertical}
+  textarea{min-height:96px;resize:vertical}
   input:focus,textarea:focus{outline:none;border-color:#E4B33C}
-  .ops{display:flex;flex-direction:column;gap:9px}
+  .ruim{border-color:#8B3A2E !important}
+
+  .ops{display:flex;flex-direction:column;gap:9px;margin-bottom:6px}
   .op{
-    display:flex;align-items:center;gap:11px;padding:13px 14px;
-    border:1px solid #302C29;border-radius:10px;background:#151312;
-    cursor:pointer;font-size:16px;line-height:1.3;
+    display:flex;align-items:center;gap:12px;padding:14px;
+    border:1px solid #302C29;border-radius:11px;background:#151312;
+    cursor:pointer;font-size:16px;line-height:1.35;text-align:left;
+    color:#fff;font-family:inherit;width:100%;
   }
   .op:hover{border-color:#4A443F}
-  .op input{accent-color:#E4B33C;width:18px;height:18px;flex:none;margin:0}
   .op.marcada{border-color:#E4B33C;background:#1D1915}
-  button.enviar{
+  .op .bola{
+    width:19px;height:19px;border-radius:50%;border:2px solid #4A443F;
+    flex:none;position:relative;
+  }
+  .op.marcada .bola{border-color:#E4B33C}
+  .op.marcada .bola::after{
+    content:'';position:absolute;inset:3px;border-radius:50%;
+    background:#E4B33C;
+  }
+
+  button.principal{
     width:100%;padding:16px;border:none;border-radius:11px;
     background:#E4B33C;color:#1A1508;font-family:inherit;font-size:17px;
-    font-weight:700;cursor:pointer;margin-top:8px;
+    font-weight:700;cursor:pointer;margin-top:10px;
   }
-  button.enviar:disabled{opacity:.55;cursor:default}
+  button.principal:disabled{opacity:.55;cursor:default}
+  .voltar{
+    background:none;border:none;color:#8F8A85;font-family:inherit;
+    font-size:14px;cursor:pointer;margin-top:16px;padding:6px 0;
+  }
+  .voltar:hover{color:#B9B3AD}
+
   .erro{
     background:#3A1714;border:1px solid #6B2A22;color:#FFB4A8;
     padding:12px 14px;border-radius:10px;font-size:14px;margin-bottom:16px;
     display:none;line-height:1.45;
   }
-  .ruim{border-color:#8B3A2E !important}
-  /* ---- o fim: o que o lead veio buscar ---- */
-  #pronto{display:none;text-align:center;padding:18px 0}
-  #pronto .tique{font-size:46px;line-height:1;margin-bottom:14px}
-  #pronto h2{font-size:24px;font-weight:800;margin-bottom:8px}
-  #pronto p{color:#B9B3AD;font-size:15px;line-height:1.55;margin-bottom:22px}
-  .baixar{
+
+  /* ---- a tela final ---- */
+  .fim{text-align:center;padding:10px 0}
+  .fim .tique{font-size:44px;line-height:1;margin-bottom:14px}
+  .fim h2{font-size:24px;font-weight:800;margin-bottom:10px;line-height:1.25}
+  .fim p{color:#B9B3AD;font-size:15.5px;line-height:1.6;margin-bottom:24px;
+         white-space:pre-line}
+  .cta{
     display:block;padding:17px;border-radius:11px;background:#E4B33C;
     color:#1A1508;font-size:17px;font-weight:700;text-decoration:none;
-    margin-bottom:14px;
+    margin-bottom:12px;
+  }
+  .cta.discreto{
+    background:transparent;border:1px solid #3A3531;color:#E8E4E0;
   }
   .guarde{
-    font-size:13px;color:#8F8A85;line-height:1.5;
+    font-size:12.5px;color:#7E7873;line-height:1.55;margin-top:18px;
     background:#141211;border:1px solid #262220;border-radius:9px;
-    padding:12px 13px;word-break:break-all;
+    padding:12px 13px;word-break:break-all;text-align:left;
   }
-  .guarde a{color:#B9B3AD}
+  .guarde a{color:#A8A29C}
 </style>
 </head>
 <body>
-<div class="caixa">
-
-  <div id="form">
-    <h1>${escaparHtml(titulo)}</h1>
-    ${texto ? `<p class="sub">${escaparHtml(texto)}</p>` : ''}
-    <div class="erro" id="erro"></div>
-    <div id="perguntas"></div>
-    <button class="enviar" id="bt" onclick="enviar()">${escaparHtml(botao)}</button>
-  </div>
-
-  <div id="pronto">
-    <div class="tique">✓</div>
-    <h2>Pronto!</h2>
-    <p id="prontoTexto"></p>
-    <a class="baixar" id="link" href="#">Baixar agora</a>
-    <div class="guarde">
-      Guarde este link — ele abre seu arquivo sempre:<br>
-      <a id="permanente" href="#"></a>
-    </div>
-  </div>
-
-</div>
+<div class="caixa" id="palco"></div>
 <script>
 var ISCA = ${JSON.stringify({
     slug: isca?.slug || '',
     tipo: isca?.tipo || 'arquivo',
+    telefone_obrigatorio: !!isca?.telefone_obrigatorio,
     perguntas: isca?.perguntas || [],
   })};
 var BASE = ${JSON.stringify(base)};
 var CERT = ${ehCertificado ? 'true' : 'false'};
+var INTRO = ${JSON.stringify({ titulo, texto, botao })};
+
+var respostas = {};        // chave -> {valor, label}
+var contato = { nome:'', email:'', telefone:'' };
+var visiveis = [];
+var passo = -1;            // -1 intro, 0 contato, 1..n perguntas
+var enviando = false;
 
 function esc(s){
   return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
   });
 }
+function q(id){ return document.getElementById(id); }
+function pinta(html){ q('palco').innerHTML = html; window.scrollTo(0,0); }
 
-function desenhar(){
-  var h = '';
-
-  // O nome é obrigatório quando é certificado: é ele que vai impresso.
-  // Nas outras iscas continua pedindo, mas sem travar quem não quer dar.
-  h += '<div class="campo"><label>Seu nome completo'
-    + (CERT ? ' <span class="obr">*</span>' : '') + '</label>'
-    + (CERT ? '<div class="ajuda">É assim que vai sair escrito no seu '
-      + 'certificado — confira antes de enviar.</div>' : '')
-    + '<input type="text" id="f_nome" autocomplete="name" '
-    + 'placeholder="Nome e sobrenome"></div>';
-
-  h += '<div class="campo"><label>Seu melhor e-mail '
-    + '<span class="obr">*</span></label>'
-    + '<input type="email" id="f_email" autocomplete="email" '
-    + 'inputmode="email" placeholder="voce@email.com"></div>';
-
-  h += '<div class="campo"><label>WhatsApp</label>'
-    + '<input type="tel" id="f_telefone" autocomplete="tel" '
-    + 'inputmode="tel" placeholder="(11) 99999-9999"></div>';
-
-  (ISCA.perguntas || []).forEach(function(q, i){
-    h += '<div class="campo" id="q_' + i + '"><label>' + esc(q.enunciado)
-      + (q.obrigatoria ? ' <span class="obr">*</span>' : '') + '</label>';
-    if (q.ajuda) h += '<div class="ajuda">' + esc(q.ajuda) + '</div>';
-
-    if (q.tipo === 'texto') {
-      h += '<textarea id="r_' + i + '" '
-        + 'placeholder="Escreva aqui"></textarea>';
-    } else {
-      var multi = q.tipo === 'multipla';
-      h += '<div class="ops">';
-      (q.opcoes || []).forEach(function(o, j){
-        h += '<label class="op" id="op_' + i + '_' + j + '">'
-          + '<input type="' + (multi ? 'checkbox' : 'radio') + '" '
-          + 'name="p' + i + '" value="' + esc(o.valor) + '" '
-          + 'data-label="' + esc(o.label || o.valor) + '" '
-          + 'onchange="marcar(' + i + ')">'
-          + '<span>' + esc(o.label || o.valor) + '</span></label>';
-      });
-      h += '</div>';
-    }
-    h += '</div>';
-  });
-
-  document.getElementById('perguntas').innerHTML = h;
-
-  // Digitar em qualquer campo apaga o aviso e a borda vermelha. Um
-  // ouvinte só, no container, em vez de um por campo.
-  document.getElementById('perguntas').addEventListener('input', function(ev){
-    document.getElementById('erro').style.display = 'none';
-    if (ev.target && ev.target.classList) ev.target.classList.remove('ruim');
-    var campo = ev.target && ev.target.closest ? ev.target.closest('.campo') : null;
-    if (campo) campo.classList.remove('ruim');
-  });
+// A pergunta só entra na fila quando a condição casa. Mesma forma do
+// quiz: {"chave":"garantir","valores":["B"]}.
+function cabe(p){
+  if(!p.condicao || !p.condicao.chave) return true;
+  var dada = respostas[p.condicao.chave];
+  if(!dada) return false;
+  return (p.condicao.valores || []).indexOf(dada.valor) !== -1;
 }
-
-// Destaque de qual opção está marcada. Sem isto, no celular o toque
-// acerta o rótulo e não fica claro se pegou.
-function marcar(i){
-  var q = ISCA.perguntas[i] || {};
-  (q.opcoes || []).forEach(function(o, j){
-    var el = document.getElementById('op_' + i + '_' + j);
-    var inp = el && el.querySelector('input');
-    if (el) el.className = 'op' + (inp && inp.checked ? ' marcada' : '');
-  });
-  var campo = document.getElementById('q_' + i);
-  if (campo) campo.classList.remove('ruim');
-  // O aviso sai junto: deixar "falta responder X" na tela depois de X
-  // respondido faz a pessoa procurar erro que não existe mais.
-  document.getElementById('erro').style.display = 'none';
-}
+function recalcular(){ visiveis = (ISCA.perguntas || []).filter(cabe); }
 
 function mostrarErro(msg){
-  var e = document.getElementById('erro');
+  var e = q('erro');
+  if(!e) return;
   e.textContent = msg;
   e.style.display = 'block';
-  e.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-async function enviar(){
-  var bt = document.getElementById('bt');
-  document.getElementById('erro').style.display = 'none';
+/* ---------------- intro ---------------- */
+function telaIntro(){
+  if(!INTRO.titulo && !INTRO.texto){ passo = 0; return desenhar(); }
+  pinta('<h1>' + esc(INTRO.titulo) + '</h1>'
+    + (INTRO.texto ? '<p class="sub">' + esc(INTRO.texto) + '</p>' : '')
+    + '<button class="principal" id="bt">' + esc(INTRO.botao) + '</button>');
+  q('bt').onclick = function(){ passo = 0; desenhar(); };
+}
 
-  // Espaço repetido some: nome colado de outro lugar costuma vir com
-  // dois, e isso ia impresso no certificado.
-  var nome = (document.getElementById('f_nome').value || '')
-    .replace(/\\s+/g, ' ').trim();
-  var email = (document.getElementById('f_email').value || '').trim();
-  var tel = (document.getElementById('f_telefone').value || '').trim();
+/* ---------------- contato ---------------- */
+function telaContato(){
+  var foneObr = ISCA.telefone_obrigatorio;
+  pinta(
+    cabecalho(0)
+    + '<div class="pergunta">Para onde mandamos'
+    + (CERT ? ' seu certificado' : ' seu material') + '?</div>'
+    + '<div class="ajuda">Preencha e clique em avançar.</div>'
+    + '<div class="erro" id="erro"></div>'
 
-  // Exige sobrenome, e não só tamanho: "Ana" tem três letras e passaria,
-  // mas certificado com primeiro nome sozinho está errado — e é o
-  // cliente que ouve a reclamação depois.
-  if (CERT && (nome.indexOf(' ') < 0 || nome.length < 5)) {
-    document.getElementById('f_nome').classList.add('ruim');
-    return mostrarErro('Escreva nome e sobrenome — é assim que vai sair '
-      + 'no certificado.');
-  }
-  if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) {
-    document.getElementById('f_email').classList.add('ruim');
-    return mostrarErro('Confira o e-mail: parece que falta alguma coisa.');
-  }
+    + '<div class="campo"><label>Nome completo <span class="obr">*</span></label>'
+    + (CERT ? '<div class="ajuda" style="margin:-3px 0 7px">É assim que vai '
+      + 'sair escrito no seu certificado — confira antes de avançar.</div>' : '')
+    + '<input type="text" id="f_nome" autocomplete="name" '
+    + 'value="' + esc(contato.nome) + '" placeholder="Nome e sobrenome"></div>'
 
-  var respostas = [];
-  for (var i = 0; i < (ISCA.perguntas || []).length; i++) {
-    var q = ISCA.perguntas[i];
-    if (q.tipo === 'texto') {
-      var v = (document.getElementById('r_' + i).value || '').trim();
-      if (v) respostas.push({ chave: q.chave, valor: v, label: v });
-      else if (q.obrigatoria) {
-        document.getElementById('q_' + i).classList.add('ruim');
-        return mostrarErro('Falta responder: ' + q.enunciado);
-      }
-    } else {
-      var marcados = document.querySelectorAll(
-        'input[name="p' + i + '"]:checked');
-      if (!marcados.length && q.obrigatoria) {
-        document.getElementById('q_' + i).classList.add('ruim');
-        return mostrarErro('Falta responder: ' + q.enunciado);
-      }
-      for (var k = 0; k < marcados.length; k++) {
-        respostas.push({
-          chave: q.chave,
-          valor: marcados[k].value,
-          label: marcados[k].getAttribute('data-label'),
-        });
-      }
+    + '<div class="campo"><label>E-mail <span class="obr">*</span></label>'
+    + '<input type="email" id="f_email" autocomplete="email" inputmode="email" '
+    + 'value="' + esc(contato.email) + '" placeholder="voce@email.com"></div>'
+
+    + '<div class="campo"><label>WhatsApp'
+    + (foneObr ? ' <span class="obr">*</span>' : '') + '</label>'
+    + '<input type="tel" id="f_telefone" autocomplete="tel" inputmode="tel" '
+    + 'value="' + esc(contato.telefone) + '" placeholder="(11) 99999-9999"></div>'
+
+    + '<button class="principal" id="bt">Avançar</button>');
+
+  q('palco').addEventListener('input', function(ev){
+    q('erro').style.display = 'none';
+    if(ev.target && ev.target.classList) ev.target.classList.remove('ruim');
+  });
+
+  q('bt').onclick = function(){
+    // Espaço repetido some: nome colado de outro lugar costuma vir com
+    // dois, e isso ia impresso no certificado.
+    contato.nome = (q('f_nome').value || '').replace(/\\s+/g, ' ').trim();
+    contato.email = (q('f_email').value || '').trim();
+    contato.telefone = (q('f_telefone').value || '').trim();
+
+    // Exige sobrenome, e não só tamanho: "Ana" passaria numa checagem de
+    // comprimento, mas certificado com primeiro nome sozinho está errado
+    // — e a reclamação chega para o cliente.
+    if(contato.nome.indexOf(' ') < 0 || contato.nome.length < 5){
+      q('f_nome').classList.add('ruim');
+      return mostrarErro(CERT
+        ? 'Escreva nome e sobrenome — é assim que vai sair no certificado.'
+        : 'Escreva seu nome e sobrenome.');
     }
+    if(!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(contato.email)){
+      q('f_email').classList.add('ruim');
+      return mostrarErro('Confira o e-mail: parece que falta alguma coisa.');
+    }
+    if(foneObr && contato.telefone.replace(/\\D/g,'').length < 10){
+      q('f_telefone').classList.add('ruim');
+      return mostrarErro('Escreva seu WhatsApp com DDD.');
+    }
+    passo = 1;
+    desenhar();
+  };
+}
+
+function cabecalho(indice){
+  recalcular();
+  var total = visiveis.length + 1;          // o contato conta como passo
+  var pct = (indice / total) * 100;
+  return '<div class="barra"><i style="width:' + pct + '%"></i></div>'
+    + '<div class="passo">Passo ' + (indice + 1) + ' de ' + total + '</div>';
+}
+
+/* ---------------- perguntas ---------------- */
+function desenhar(){
+  recalcular();
+  if(passo === -1) return telaIntro();
+  if(passo === 0) return telaContato();
+  if(passo > visiveis.length) return enviar();
+
+  var p = visiveis[passo - 1];
+  var dada = respostas[p.chave];
+
+  var corpo;
+  if(p.tipo === 'texto'){
+    corpo = '<textarea id="r_texto" placeholder="Escreva aqui">'
+      + esc(dada ? dada.valor : '') + '</textarea>'
+      + '<button class="principal" id="bt">Avançar</button>';
+  }else{
+    corpo = '<div class="ops">'
+      + (p.opcoes || []).map(function(o, j){
+          var marcada = dada && dada.valor === o.valor;
+          return '<button type="button" class="op' + (marcada ? ' marcada' : '')
+            + '" data-i="' + j + '"><span class="bola"></span>'
+            + '<span>' + esc(o.label || o.valor) + '</span></button>';
+        }).join('')
+      + '</div>'
+      + (p.obrigatoria ? '' : '<button class="principal" id="bt" '
+          + 'style="background:transparent;border:1px solid #3A3531;'
+          + 'color:#E8E4E0">Pular</button>');
   }
 
-  bt.disabled = true;
-  bt.textContent = 'Enviando...';
-  try {
+  pinta(
+    cabecalho(passo)
+    + (p.antes ? '<div class="antes">' + esc(p.antes) + '</div>' : '')
+    + (p.imagem ? '<img class="imagem" src="' + esc(p.imagem) + '" alt=""'
+        + ' loading="lazy">' : '')
+    + '<div class="pergunta">' + esc(p.enunciado) + '</div>'
+    + (p.ajuda ? '<div class="ajuda">' + esc(p.ajuda) + '</div>' : '')
+    + '<div class="erro" id="erro"></div>'
+    + corpo
+    + '<button class="voltar" id="bt_voltar">← Voltar</button>');
+
+  if(p.tipo === 'texto'){
+    q('bt').onclick = function(){
+      var v = (q('r_texto').value || '').trim();
+      if(p.obrigatoria && !v) return mostrarErro('Responda para continuar.');
+      if(v) respostas[p.chave] = { valor: v, label: v };
+      else delete respostas[p.chave];
+      passo++; desenhar();
+    };
+  }else{
+    Array.prototype.forEach.call(document.querySelectorAll('.op'), function(b){
+      b.onclick = function(){
+        var o = (p.opcoes || [])[Number(b.dataset.i)];
+        if(!o) return;
+        respostas[p.chave] = { valor: o.valor, label: o.label || o.valor };
+        Array.prototype.forEach.call(document.querySelectorAll('.op'),
+          function(x){ x.classList.remove('marcada'); });
+        b.classList.add('marcada');
+        // Avança sozinho, mas com uma pausa para a pessoa VER que pegou.
+        // Sem ela, no celular o toque parece não ter funcionado.
+        setTimeout(function(){ passo++; desenhar(); }, 240);
+      };
+    });
+    if(q('bt')) q('bt').onclick = function(){
+      delete respostas[p.chave];
+      passo++; desenhar();
+    };
+  }
+
+  q('bt_voltar').onclick = function(){
+    // Volta para o passo anterior da fila ATUAL. Se a pessoa mudou de
+    // ramo, a fila mudou, e voltar pelo número cru pularia uma tela.
+    passo--;
+    desenhar();
+  };
+}
+
+/* ---------------- envio ---------------- */
+async function enviar(){
+  if(enviando) return;
+  enviando = true;
+  pinta('<div class="fim"><div class="tique">⏳</div>'
+    + '<h2>Só um instante…</h2><p>Estamos preparando seu arquivo.</p></div>');
+
+  // Manda SÓ as respostas das perguntas visíveis. Quem escolheu B,
+  // respondeu a pergunta do ramo B e depois voltou e trocou para A
+  // deixaria uma resposta órfã — e ela contaria na leitura por objeção
+  // como se a pessoa estivesse nos dois ramos.
+  recalcular();
+  var lista = visiveis.filter(function(p){ return !!respostas[p.chave]; })
+    .map(function(p){
+      return { chave: p.chave, valor: respostas[p.chave].valor,
+               label: respostas[p.chave].label };
+    });
+
+  try{
     var r = await fetch(BASE + '/i/' + encodeURIComponent(ISCA.slug), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nome: nome, email: email, telefone: tel,
-                             respostas: respostas }),
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({
+        nome: contato.nome, email: contato.email,
+        telefone: contato.telefone, respostas: lista }),
     });
     var d = await r.json();
-    if (!d || !d.ok) throw new Error((d && d.erro) || 'nao deu certo');
-
-    document.getElementById('form').style.display = 'none';
-    var p = document.getElementById('pronto');
-    document.getElementById('prontoTexto').textContent = CERT
-      ? 'Seu certificado está pronto, no nome de ' + nome + '.'
-      : 'Seu material está pronto para baixar.';
-    document.getElementById('link').href = d.download;
-    document.getElementById('permanente').href = d.pagina;
-    document.getElementById('permanente').textContent = d.pagina;
-    p.style.display = 'block';
-    window.scrollTo(0, 0);
-  } catch (e) {
-    bt.disabled = false;
-    bt.textContent = ${JSON.stringify(botao)};
-    mostrarErro('Não consegui enviar: ' + (e.message || e)
-      + '. Tente de novo em instantes.');
+    if(!d || !d.ok) throw new Error((d && d.erro) || 'nao deu certo');
+    telaFim(d);
+  }catch(e){
+    enviando = false;
+    pinta('<div class="fim"><div class="tique">😕</div>'
+      + '<h2>Não consegui enviar</h2>'
+      + '<p>' + esc(e.message || e) + '</p>'
+      + '<button class="principal" id="bt">Tentar de novo</button></div>');
+    q('bt').onclick = function(){ enviar(); };
   }
+}
+
+function telaFim(d){
+  var des = d.desfecho || {};
+  var temCta = des.botao && des.url;
+  // Sem desfecho configurado, o padrão é entregar o que a pessoa veio
+  // buscar. E quando há desfecho, o download continua aparecendo a menos
+  // que o cliente desligue — foi prometido em troca do formulário.
+  var mostrarDownload = !des.titulo || des.mostrar_download !== false;
+
+  pinta('<div class="fim">'
+    + '<div class="tique">✓</div>'
+    + '<h2>' + esc(des.titulo || (CERT ? 'Seu certificado está pronto'
+                                       : 'Seu material está pronto')) + '</h2>'
+    + '<p>' + esc(des.texto || (CERT
+        ? 'No nome de ' + contato.nome + '.'
+        : 'Toque no botão para baixar.')) + '</p>'
+    + (temCta
+        ? '<a class="cta" href="' + esc(des.url) + '" target="_blank" '
+          + 'rel="noopener">' + esc(des.botao) + '</a>' : '')
+    + (mostrarDownload
+        ? '<a class="cta' + (temCta ? ' discreto' : '') + '" href="'
+          + esc(d.download) + '">Baixar'
+          + (CERT ? ' certificado' : ' os slides') + '</a>' : '')
+    + '<div class="guarde">Guarde este link — ele abre seu arquivo sempre:'
+    + '<br><a href="' + esc(d.pagina) + '">' + esc(d.pagina) + '</a></div>'
+    + '</div>');
 }
 
 desenhar();
@@ -6431,7 +6542,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v114-iscas',
+            versao: 'v115-isca-funil',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -6913,6 +7024,10 @@ export default {
             ok: true,
             pagina: `${url.origin}/c/${encodeURIComponent(r.codigo)}`,
             download: `${url.origin}/c/${encodeURIComponent(r.codigo)}/baixar`,
+            // Quem escolhe a tela final é o banco, pelas respostas. Um
+            // dos desfechos carrega o link de pagamento, então ele só
+            // aparece aqui, depois de responder — nunca no formulário.
+            desfecho: r.desfecho || null,
           }, 200, ch);
         }
 
