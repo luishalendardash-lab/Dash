@@ -3716,8 +3716,12 @@ var INTRO = ${JSON.stringify({ titulo, texto, botao })};
 
 var respostas = {};        // chave -> {valor, label}
 var contato = { nome:'', email:'', telefone:'' };
-var visiveis = [];
-var passo = -1;            // -1 intro, 0 contato, 1..n perguntas
+// A trilha é a pilha de perguntas por onde a pessoa passou. Ela é o
+// caminho de verdade e é ela que o Voltar desfaz — com ramificação, o
+// "passo anterior" não é o número anterior: depende de por onde veio.
+var trilha = [];
+var atual = null;          // chave da pergunta na tela
+var tela = 'intro';        // intro | contato | pergunta | fim
 var enviando = false;
 
 function esc(s){
@@ -3728,15 +3732,65 @@ function esc(s){
 function q(id){ return document.getElementById(id); }
 function pinta(html){ q('palco').innerHTML = html; window.scrollTo(0,0); }
 
-// A pergunta só entra na fila quando a condição casa. Mesma forma do
-// quiz: {"chave":"garantir","valores":["B"]}.
-function cabe(p){
-  if(!p.condicao || !p.condicao.chave) return true;
-  var dada = respostas[p.condicao.chave];
-  if(!dada) return false;
-  return (p.condicao.valores || []).indexOf(dada.valor) !== -1;
+/* ---------------- o caminho ----------------
+
+   Cada resposta aponta para o próximo passo: "p:<chave>" vai para uma
+   pergunta, "f:<chave>" termina numa tela final, e vazio segue a ordem.
+   É o mesmo desenho que o cliente vê no quadro. */
+
+function porChave(c){
+  var l = (ISCA.perguntas || []).filter(function(p){ return p.chave === c; });
+  return l[0] || null;
 }
-function recalcular(){ visiveis = (ISCA.perguntas || []).filter(cabe); }
+
+function proximoDe(p, valor){
+  var prox = '';
+  if(valor != null){
+    var op = (p.opcoes || []).filter(function(o){ return o.valor === valor; })[0];
+    if(op && op.proximo) prox = String(op.proximo);
+  }
+  if(!prox && p.proximo) prox = String(p.proximo);
+  if(prox) return prox;
+
+  // Sem seta: a próxima na ordem. É o que faz um funil reto funcionar
+  // sem ninguém ligar seta nenhuma.
+  var i = (ISCA.perguntas || []).indexOf(p);
+  var seg = (ISCA.perguntas || [])[i + 1];
+  return seg ? 'p:' + seg.chave : '';
+}
+
+/**
+ * O caminho mais longo do grafo, para a barra de progresso ter régua.
+ *
+ * Com ramificação não existe "de N passos": um lead vê três telas e
+ * outro vê cinco. A barra anda sobre o caminho mais longo, e o rótulo
+ * não promete um total que pode mudar no meio.
+ */
+function maiorCaminho(){
+  var memo = {};
+  function fundo(chave, vistos){
+    if(!chave || vistos[chave]) return 0;
+    var p = porChave(chave);
+    if(!p) return 0;
+    if(memo[chave] != null) return memo[chave];
+    var meus = Object.assign({}, vistos);
+    meus[chave] = true;
+    var maior = 0;
+    var destinos = (p.opcoes || []).length
+      ? (p.opcoes || []).map(function(o){ return proximoDe(p, o.valor); })
+      : [proximoDe(p, null)];
+    destinos.forEach(function(d){
+      if(d && d.slice(0, 2) === 'p:'){
+        var v = fundo(d.slice(2), meus);
+        if(v > maior) maior = v;
+      }
+    });
+    memo[chave] = 1 + maior;
+    return memo[chave];
+  }
+  var ini = (ISCA.perguntas || [])[0];
+  return ini ? fundo(ini.chave, {}) : 1;
+}
 
 function mostrarErro(msg){
   var e = q('erro');
@@ -3747,11 +3801,11 @@ function mostrarErro(msg){
 
 /* ---------------- intro ---------------- */
 function telaIntro(){
-  if(!INTRO.titulo && !INTRO.texto){ passo = 0; return desenhar(); }
+  if(!INTRO.titulo && !INTRO.texto){ tela = 'contato'; return desenhar(); }
   pinta('<h1>' + esc(INTRO.titulo) + '</h1>'
     + (INTRO.texto ? '<p class="sub">' + esc(INTRO.texto) + '</p>' : '')
     + '<button class="principal" id="bt">' + esc(INTRO.botao) + '</button>');
-  q('bt').onclick = function(){ passo = 0; desenhar(); };
+  q('bt').onclick = function(){ tela = 'contato'; desenhar(); };
 }
 
 /* ---------------- contato ---------------- */
@@ -3810,27 +3864,40 @@ function telaContato(){
       q('f_telefone').classList.add('ruim');
       return mostrarErro('Escreva seu WhatsApp com DDD.');
     }
-    passo = 1;
+    var ini = (ISCA.perguntas || [])[0];
+    if(!ini) return enviar();
+    trilha = [ini.chave];
+    atual = ini.chave;
+    tela = 'pergunta';
     desenhar();
   };
 }
 
+/**
+ * A barra e o rótulo do passo.
+ *
+ * Não diz "de N": com ramificação o total muda conforme a resposta, e
+ * ver "Passo 3 de 3" e depois "Passo 4 de 4" faz a pessoa achar que o
+ * formulário esticou. A barra anda sobre o caminho mais longo, que é
+ * uma régua honesta.
+ */
 function cabecalho(indice){
-  recalcular();
-  var total = visiveis.length + 1;          // o contato conta como passo
-  var pct = (indice / total) * 100;
+  var regua = Math.max(1, maiorCaminho() + 1);   // +1 pelo contato
+  var pct = Math.min(100, (indice / regua) * 100);
   return '<div class="barra"><i style="width:' + pct + '%"></i></div>'
-    + '<div class="passo">Passo ' + (indice + 1) + ' de ' + total + '</div>';
+    + '<div class="passo">Passo ' + (indice + 1) + '</div>';
 }
 
 /* ---------------- perguntas ---------------- */
 function desenhar(){
-  recalcular();
-  if(passo === -1) return telaIntro();
-  if(passo === 0) return telaContato();
-  if(passo > visiveis.length) return enviar();
+  if(tela === 'intro') return telaIntro();
+  if(tela === 'contato') return telaContato();
 
-  var p = visiveis[passo - 1];
+  var p = porChave(atual);
+  // Seta apontando para pergunta que não existe mais: em vez de travar
+  // a tela, encerra — o servidor resolve a tela final de qualquer jeito.
+  if(!p) return enviar();
+
   var dada = respostas[p.chave];
 
   var corpo;
@@ -3853,7 +3920,7 @@ function desenhar(){
   }
 
   pinta(
-    cabecalho(passo)
+    cabecalho(trilha.length)
     + (p.antes ? '<div class="antes">' + esc(p.antes) + '</div>' : '')
     + (p.imagem ? '<img class="imagem" src="' + esc(p.imagem) + '" alt=""'
         + ' loading="lazy">' : '')
@@ -3869,7 +3936,7 @@ function desenhar(){
       if(p.obrigatoria && !v) return mostrarErro('Responda para continuar.');
       if(v) respostas[p.chave] = { valor: v, label: v };
       else delete respostas[p.chave];
-      passo++; desenhar();
+      andar(proximoDe(p, v || null));
     };
   }else{
     Array.prototype.forEach.call(document.querySelectorAll('.op'), function(b){
@@ -3882,21 +3949,45 @@ function desenhar(){
         b.classList.add('marcada');
         // Avança sozinho, mas com uma pausa para a pessoa VER que pegou.
         // Sem ela, no celular o toque parece não ter funcionado.
-        setTimeout(function(){ passo++; desenhar(); }, 240);
+        setTimeout(function(){ andar(proximoDe(p, o.valor)); }, 240);
       };
     });
     if(q('bt')) q('bt').onclick = function(){
       delete respostas[p.chave];
-      passo++; desenhar();
+      andar(proximoDe(p, null));
     };
   }
 
   q('bt_voltar').onclick = function(){
-    // Volta para o passo anterior da fila ATUAL. Se a pessoa mudou de
-    // ramo, a fila mudou, e voltar pelo número cru pularia uma tela.
-    passo--;
+    // Desfaz a trilha, não um número: com ramificação, a tela anterior
+    // depende de por onde a pessoa veio.
+    trilha.pop();
+    if(!trilha.length){ tela = 'contato'; atual = null; return desenhar(); }
+    atual = trilha[trilha.length - 1];
     desenhar();
   };
+}
+
+/**
+ * Anda para o próximo nó.
+ *
+ * Se for uma tela final ou não houver para onde ir, envia — quem decide
+ * QUAL tela final é o servidor, caminhando o mesmo grafo com as
+ * respostas. Duas caminhadas, uma regra: se discordassem, o lead veria
+ * uma tela e o relatório contaria outra.
+ */
+function andar(destino){
+  var d = String(destino || '');
+  if(d.slice(0, 2) === 'p:'){
+    var c = d.slice(2);
+    if(porChave(c)){
+      atual = c;
+      trilha.push(c);
+      tela = 'pergunta';
+      return desenhar();
+    }
+  }
+  return enviar();
 }
 
 /* ---------------- envio ---------------- */
@@ -3906,15 +3997,15 @@ async function enviar(){
   pinta('<div class="fim"><div class="tique">⏳</div>'
     + '<h2>Só um instante…</h2><p>Estamos preparando seu arquivo.</p></div>');
 
-  // Manda SÓ as respostas das perguntas visíveis. Quem escolheu B,
-  // respondeu a pergunta do ramo B e depois voltou e trocou para A
-  // deixaria uma resposta órfã — e ela contaria na leitura por objeção
-  // como se a pessoa estivesse nos dois ramos.
-  recalcular();
-  var lista = visiveis.filter(function(p){ return !!respostas[p.chave]; })
-    .map(function(p){
-      return { chave: p.chave, valor: respostas[p.chave].valor,
-               label: respostas[p.chave].label };
+  // Manda SÓ o que está na trilha. Quem escolheu um ramo, respondeu a
+  // pergunta dele e depois voltou e trocou de ramo deixaria uma resposta
+  // órfã — e ela contaria na leitura por objeção como se a pessoa
+  // estivesse nos dois ramos ao mesmo tempo. O servidor também limpa,
+  // mas não custa nada não mandar.
+  var lista = trilha.filter(function(c){ return !!respostas[c]; })
+    .map(function(c){
+      return { chave: c, valor: respostas[c].valor,
+               label: respostas[c].label };
     });
 
   try{
@@ -6583,7 +6674,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v116-varios-arquivos',
+            versao: 'v117-fluxo-setas',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
