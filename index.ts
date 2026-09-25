@@ -3945,21 +3945,39 @@ function telaFim(d){
   // que o cliente desligue — foi prometido em troca do formulário.
   var mostrarDownload = !des.titulo || des.mostrar_download !== false;
 
+  // Um botão por arquivo, com o nome que o cliente deu. Três slides num
+  // ZIP seria um clique a menos aqui e um problema a mais no celular do
+  // lead, que é onde a maioria vai abrir isso.
+  var arquivos = d.arquivos || [];
+  var botoes = '';
+  if (mostrarDownload) {
+    if (CERT || !arquivos.length) {
+      botoes = '<a class="cta' + (temCta ? ' discreto' : '') + '" href="'
+        + esc(d.download) + '">Baixar'
+        + (CERT ? ' certificado' : ' o material') + '</a>';
+    } else {
+      botoes = arquivos.map(function(a, i){
+        return '<a class="cta' + (temCta || i > 0 ? ' discreto' : '')
+          + '" href="' + esc(d.download) + '/' + (i + 1) + '">'
+          + esc(a.rotulo || ('Baixar ' + (i + 1))) + '</a>';
+      }).join('');
+    }
+  }
+
   pinta('<div class="fim">'
     + '<div class="tique">✓</div>'
     + '<h2>' + esc(des.titulo || (CERT ? 'Seu certificado está pronto'
                                        : 'Seu material está pronto')) + '</h2>'
     + '<p>' + esc(des.texto || (CERT
         ? 'No nome de ' + contato.nome + '.'
-        : 'Toque no botão para baixar.')) + '</p>'
+        : (arquivos.length > 1
+            ? 'Baixe os ' + arquivos.length + ' arquivos abaixo.'
+            : 'Toque no botão para baixar.'))) + '</p>'
     + (temCta
         ? '<a class="cta" href="' + esc(des.url) + '" target="_blank" '
           + 'rel="noopener">' + esc(des.botao) + '</a>' : '')
-    + (mostrarDownload
-        ? '<a class="cta' + (temCta ? ' discreto' : '') + '" href="'
-          + esc(d.download) + '">Baixar'
-          + (CERT ? ' certificado' : ' os slides') + '</a>' : '')
-    + '<div class="guarde">Guarde este link — ele abre seu arquivo sempre:'
+    + botoes
+    + '<div class="guarde">Guarde este link — ele abre seus arquivos sempre:'
     + '<br><a href="' + esc(d.pagina) + '">' + esc(d.pagina) + '</a></div>'
     + '</div>');
 }
@@ -3985,6 +4003,8 @@ function paginaEntrega(entrega: any, base: string): string {
   // `/pdf`, o botão devolvia esta mesma página em vez de baixar — sem
   // erro nenhum, só não acontecia nada.
   const link = `${base}/c/${encodeURIComponent(entrega?.codigo || '')}/baixar`;
+  const arquivos: any[] = Array.isArray(entrega?.isca?.arquivos)
+    ? entrega.isca.arquivos : [];
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -4010,6 +4030,15 @@ function paginaEntrega(entrega: any, base: string): string {
   a.baixar{
     display:block;padding:17px;border-radius:11px;background:#E4B33C;
     color:#1A1508;font-size:17px;font-weight:700;text-decoration:none;
+    margin-bottom:11px;
+  }
+  /* Do segundo arquivo em diante fica contornado, não cheio: três
+     botões dourados iguais não têm ordem de leitura. */
+  a.baixar.mais{
+    background:transparent;border:1px solid #3A3531;color:#E8E4E0;
+  }
+  .pego{
+    display:inline-block;font-size:12px;color:#7E7873;margin:-4px 0 12px;
   }
   .rodape{margin-top:22px;font-size:13px;color:#6F6A65;line-height:1.5}
 </style>
@@ -4021,8 +4050,20 @@ function paginaEntrega(entrega: any, base: string): string {
   <p>${ehCert
     ? 'Seu certificado está pronto. Se o nome estiver errado, '
       + 'preencha o formulário de novo com o nome certo.'
-    : 'Toque no botão para baixar.'}</p>
-  <a class="baixar" href="${link}">Baixar${ehCert ? ' certificado' : ''}</a>
+    : (arquivos.length > 1
+        ? `São ${arquivos.length} arquivos. Baixe um por um.`
+        : 'Toque no botão para baixar.')}</p>
+  ${ehCert || !arquivos.length
+    ? `<a class="baixar" href="${link}">Baixar${ehCert ? ' certificado' : ''}</a>`
+    : arquivos.map((a: any, i: number) => {
+        // Marca o que a pessoa já pegou. Quem volta a esta página dias
+        // depois não lembra de qual aula baixou.
+        const pego = Array.isArray(entrega?.baixou_quais)
+          && entrega.baixou_quais.indexOf(a?.rotulo) !== -1;
+        return `<a class="baixar${i > 0 ? ' mais' : ''}" href="${link}/${i + 1}">`
+          + `${escaparHtml(a?.rotulo || `Baixar ${i + 1}`)}`
+          + `${pego ? ' ✓' : ''}</a>`;
+      }).join('')}
   <div class="rodape">Este link é seu e continua funcionando.</div>
 </div>
 </body>
@@ -6542,7 +6583,7 @@ export default {
             supabase_url: !!env.SUPABASE_URL,
             supabase_key: !!env.SUPABASE_SERVICE_KEY,
             anon_key: !!env.SUPABASE_ANON_KEY,
-            versao: 'v115-isca-funil',
+            versao: 'v116-varios-arquivos',
             webhook_secret: env.WEBHOOK_SECRET ? `${env.WEBHOOK_SECRET.length} chars` : false,
             debug_token: !!env.DEBUG_TOKEN,
             lancamento_padrao: env.LANCAMENTO_PADRAO || false,
@@ -7024,6 +7065,11 @@ export default {
             ok: true,
             pagina: `${url.origin}/c/${encodeURIComponent(r.codigo)}`,
             download: `${url.origin}/c/${encodeURIComponent(r.codigo)}/baixar`,
+            // Só os rótulos, um por arquivo: é com isso que a tela final
+            // desenha um botão para cada um. As URLs não vêm — o
+            // download passa pela rota, que é o que registra qual
+            // arquivo a pessoa pegou.
+            arquivos: r.arquivos || [],
             // Quem escolhe a tela final é o banco, pelas respostas. Um
             // dos desfechos carrega o link de pagamento, então ele só
             // aparece aqui, depois de responder — nunca no formulário.
@@ -7070,16 +7116,14 @@ export default {
         }
 
         if (partes[2] === 'baixar') {
-          // Contabiliza sem atrasar o download.
-          ctx.waitUntil(
-            db.rpc('isca_marcar_baixa', { p: { codigo } }).catch(() => {}));
-
           const nomeLead = String(entrega.nome || 'participante');
 
           // ---- arquivo fixo: repassa o do R2 com nome decente
           if (entrega.isca?.tipo === 'arquivo') {
-            const destino = String(entrega.arquivo_url || '').trim();
-            if (!destino) {
+            const lista: any[] = Array.isArray(entrega.isca?.arquivos)
+              ? entrega.isca.arquivos : [];
+
+            if (!lista.length) {
               return new Response(
                 paginaAviso('Arquivo ainda não publicado',
                   'O material desta entrega ainda não foi carregado. '
@@ -7089,7 +7133,37 @@ export default {
                   'Cache-Control': 'no-store',
                 } });
             }
-            const r2 = await fetch(destino).catch(() => null);
+
+            // `/baixar` sem número serve o único arquivo quando é um só,
+            // e manda para a página quando são vários — /baixar sozinho
+            // não tem como escolher, e escolher o primeiro por conta
+            // própria entregaria a aula 1 a quem clicou em "aula 3" num
+            // link antigo.
+            if (partes[3] === undefined) {
+              if (lista.length === 1) {
+                return Response.redirect(
+                  `${url.origin}/c/${encodeURIComponent(codigo)}/baixar/1`, 302);
+              }
+              return Response.redirect(
+                `${url.origin}/c/${encodeURIComponent(codigo)}`, 302);
+            }
+
+            const n = Number(partes[3]);
+            const item = Number.isInteger(n) && n >= 1 && n <= lista.length
+              ? lista[n - 1] : null;
+            if (!item) {
+              return new Response(
+                paginaAviso('Arquivo não encontrado',
+                  'Este link aponta para um arquivo que não existe mais. '
+                  + 'Abra a sua página de download para ver a lista atual.'),
+                { status: 404, headers: {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'Cache-Control': 'no-store',
+                } });
+            }
+
+            const destino = String(item.url || '').trim();
+            const r2 = destino ? await fetch(destino).catch(() => null) : null;
             if (!r2 || !r2.ok) {
               return new Response(
                 paginaAviso('Não consegui buscar o arquivo',
@@ -7099,25 +7173,36 @@ export default {
                   'Cache-Control': 'no-store',
                 } });
             }
+
+            // Registra QUAL arquivo, e só depois de o arquivo ter vindo:
+            // marcar antes contaria download de arquivo que falhou, e o
+            // cliente veria "pegou a aula 3" de quem não pegou nada.
+            ctx.waitUntil(db.rpc('isca_marcar_baixa', {
+              p: { codigo, rotulo: item.rotulo || '' },
+            }).catch(() => {}));
+
             // O nome do arquivo no R2 tem data e sorteio no meio. Trocar
-            // aqui é o que faz o lead baixar "slides-perito.pdf" em vez
+            // aqui é o que faz o lead baixar "slides-aula-1.pdf" em vez
             // de "slides-a1b2c3d4.pdf".
             const extR2 = (destino.match(/\.([a-z0-9]{2,5})(?:\?|$)/i)?.[1]
               || 'pdf').toLowerCase();
-            const nomeFixo = entrega.isca?.arquivo_nome
-              || nomeDeArquivo(entrega.isca?.slug || 'material', '', extR2);
+            const nomeFixo = item.nome
+              || nomeDeArquivo(item.rotulo || entrega.isca?.slug || 'material',
+                               '', extR2);
             return new Response(r2.body, {
               headers: {
                 'Content-Type': r2.headers.get('content-type')
                   || 'application/octet-stream',
                 'Content-Disposition':
-                  `attachment; filename="${nomeFixo.replace(/"/g, '')}"`,
+                  `attachment; filename="${String(nomeFixo).replace(/"/g, '')}"`,
                 'Cache-Control': 'no-store',
               },
             });
           }
 
           // ---- certificado: montado agora, com o nome desta entrega
+          ctx.waitUntil(
+            db.rpc('isca_marcar_baixa', { p: { codigo } }).catch(() => {}));
           const feito = await montarCertificado(entrega);
           if (!feito.pdf) {
             return new Response(
